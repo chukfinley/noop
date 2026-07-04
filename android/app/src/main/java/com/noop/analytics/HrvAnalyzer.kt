@@ -83,16 +83,26 @@ object HrvAnalyzer {
 
     /**
      * Task Force (1996) RMSSD over already-clean NN intervals (ms). Returns null
-     * when fewer than 2 values (no successive differences). No filtering applied.
+     * when fewer than 2 values (no successive differences).
+     *
+     * [maxSuccessiveDiffMs] is an optional, additive artifact guard: successive
+     * differences whose magnitude exceeds it are dropped before squaring (the cheap
+     * |Δ| filter whoopsi applies in `common/preprocessing.py`, complementing the
+     * Malik local-median ectopic pass). With the default `null` no diff is dropped and
+     * the result is byte-identical to the unfiltered formula (denominator nn.size−1).
      */
-    fun rmssdRaw(nn: List<Double>): Double? {
+    fun rmssdRaw(nn: List<Double>, maxSuccessiveDiffMs: Double? = null): Double? {
         if (nn.size < 2) return null
         var sumSq = 0.0
+        var n = 0
         for (i in 1 until nn.size) {
             val d = nn[i] - nn[i - 1]
+            if (maxSuccessiveDiffMs != null && abs(d) > maxSuccessiveDiffMs) continue
             sumSq += d * d
+            n++
         }
-        return sqrt(sumSq / (nn.size - 1).toDouble())
+        if (n < 1) return null
+        return sqrt(sumSq / n.toDouble())
     }
 
     /**

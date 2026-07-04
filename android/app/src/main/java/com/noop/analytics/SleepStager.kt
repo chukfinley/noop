@@ -2067,6 +2067,41 @@ object SleepStager {
         return vals.sum() / vals.size.toDouble()
     }
 
+    /**
+     * RMSSD measured in the single 5-min window most likely to be slow-wave sleep (ms), or null.
+     * Additive alternative to [sessionAvgHRV] (whole-night mean): WHOOP reports HRV from the
+     * deepest, most stable sleep window, which is lower-variance night-to-night and closer to
+     * the reference than the whole-session average (inflated by REM/wake epochs). Ported from
+     * whoopsi `common.preprocessing.compute_hrv_rmssd(method="sws")`.
+     *
+     * SWS window = the one minimizing `-mean(RR) + 2·std(RR)` (prefers high RR / low HR and low
+     * variability). RMSSD on that window uses the `|Δ| < 200 ms` successive-diff guard. Purely
+     * additive — [sessionAvgHRV] stays the default input to recovery.
+     */
+    internal fun sessionAvgHRVSws(start: Long, end: Long, rr: List<RrInterval>): Double? {
+        val seg = rr.filter { it.ts in start..end }
+        if (seg.isEmpty()) return null
+        val windowS = 5 * 60L
+        var bestScore = Double.POSITIVE_INFINITY
+        var bestRmssd: Double? = null
+        var t = start
+        while (t < end) {
+            val bucket = seg.filter { it.ts >= t && it.ts < t + windowS }.map { it.rrMs.toDouble() }
+            val filtered = HrvAnalyzer.rangeFilter(bucket)
+            if (filtered.size >= 2) {
+                val mean = filtered.sum() / filtered.size.toDouble()
+                val variance = filtered.sumOf { (it - mean) * (it - mean) } / filtered.size.toDouble()
+                val score = -mean + 2.0 * kotlin.math.sqrt(variance)
+                if (score < bestScore) {
+                    val r = HrvAnalyzer.rmssdRaw(filtered, maxSuccessiveDiffMs = 200.0)
+                    if (r != null) { bestScore = score; bestRmssd = r }
+                }
+            }
+            t += windowS
+        }
+        return bestRmssd
+    }
+
     // ── AASM hypnogram metrics ───────────────────────────────────────────────
 
     /** AASM-style metrics from a session's stage segments. */

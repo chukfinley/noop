@@ -65,6 +65,7 @@ import com.noop.ingest.LiftingImporter
 import com.noop.ingest.NutritionCsvImporter
 import com.noop.ingest.XiaomiBandImporter
 import com.noop.ingest.WhoopCsvImporter
+import com.noop.ingest.WhoopJsonImporter
 import com.noop.ingest.WearableExportImporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -254,6 +255,11 @@ fun DataSourcesScreen(vm: AppViewModel) {
         ActivityResultContracts.OpenDocument(),
     ) { uri -> if (uri != null) runImport { WhoopCsvImporter.importZip(context, uri, vm.repo) } }
 
+    // whoopsi backup (full cloud pull): a zipped whoop_backup/ folder, or a single JSON from it.
+    val whoopsiImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) runImport { WhoopJsonImporter.importBackup(context, uri, vm.repo) } }
+
     val appleImportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri -> if (uri != null) runImport { AppleHealthImporter.importExport(context, uri, vm.repo) } }
@@ -389,6 +395,12 @@ fun DataSourcesScreen(vm: AppViewModel) {
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) { whoopImportLauncher.launch(arrayOf("*/*")) }
+            BackupButton(
+                label = "Import whoopsi backup (.zip/.json)",
+                icon = Icons.Filled.FileUpload,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { whoopsiImportLauncher.launch(arrayOf("*/*")) }
         }
         }
 

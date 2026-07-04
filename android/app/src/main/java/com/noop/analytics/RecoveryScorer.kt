@@ -162,6 +162,42 @@ object RecoveryScorer {
         return floor.roundToInt()
     }
 
+    /** Minimum in-window HR samples before the quartile blend is trusted (else median). */
+    const val robustRestingHRMinSamples = 30
+
+    /**
+     * Robust resting-HR estimate: the mean of the 25th percentile and the median of
+     * in-window sleep HR (bpm). Additive WHOOP-style "lowest quartile" central tendency,
+     * ported from whoopsi algo4 (`engine.compute_rhr`). Unlike [restingHR] (lowest 5-min
+     * bin mean) it does not collapse onto a single quiet trough, so it avoids the
+     * systematic under-estimate the bin-minimum can produce. Filters out HR ≤ 30 (garbage).
+     * Falls back to the plain median below [robustRestingHRMinSamples] samples, then null.
+     *
+     * Purely additive: a new entry point. [restingHR] remains the default everywhere.
+     */
+    fun restingHRRobust(hr: List<HrSample>, start: Long, end: Long): Int? {
+        val vals = hr.asSequence()
+            .filter { it.ts in start..end && it.bpm > 30 }
+            .map { it.bpm.toDouble() }
+            .sorted().toList()
+        if (vals.isEmpty()) return null
+        val median = percentileSorted(vals, 50.0)
+        if (vals.size < robustRestingHRMinSamples) return median.roundToInt()
+        val p25 = percentileSorted(vals, 25.0)
+        return ((p25 + median) / 2.0).roundToInt()
+    }
+
+    /** numpy-style linear-interpolated percentile over an already-sorted, non-empty list. */
+    private fun percentileSorted(sorted: List<Double>, pct: Double): Double {
+        val n = sorted.size
+        if (n == 1) return sorted[0]
+        val pos = (pct / 100.0) * (n - 1).toDouble()
+        val lo = pos.toInt()
+        val hi = minOf(lo + 1, n - 1)
+        val frac = pos - lo
+        return sorted[lo] + (sorted[hi] - sorted[lo]) * frac
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Recovery band
     // ─────────────────────────────────────────────────────────────────────────
