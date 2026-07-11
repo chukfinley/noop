@@ -16,11 +16,19 @@ class Metrics {
   static const space18 = 18.0;
   static const space20 = 20.0;
   static const space24 = 24.0;
-  static const cardRadius = 14.0;
-  static const cornerXs = 2.0;
-  static const cornerSm = 9.0;
-  static const cornerBadge = 6.0;
-  static const cornerPill = 50.0;
+  // ── Corner-radius scale (the ONLY rounding values in the app) ──────────────
+  // Every rounded surface picks one of these so any two of a kind share a
+  // corner. Screens must not invent raw radii; snap to the nearest token.
+  static const cornerXs = 2.0; //     hairline chips / progress caps
+  static const cornerBadge = 6.0; //  small stamps, score badges, bars
+  static const cornerSm = 9.0; //     legacy small
+  static const cornerChip = 10.0; //  tonal icon chips
+  static const cardRadius = 14.0; //  standard card
+  static const cornerCard = 14.0; //  alias of cardRadius
+  static const cornerLarge = 20.0; // list groups, section cards
+  static const cornerSheet = 30.0; // bottom sheets
+  static const cornerHero = 36.0; //  hero / glass / feature cards
+  static const cornerPill = 50.0; //  pills, toggles, the nav bar
   static const cardPadding = 16.0;
   static const gap = 12.0;
   static const sectionGap = 28.0;

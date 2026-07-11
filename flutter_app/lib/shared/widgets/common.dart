@@ -33,12 +33,38 @@ class SectionHeader extends StatelessWidget {
       );
 }
 
-/// A thin hairline divider using the palette hairline.
+/// A thin hairline divider using the palette hairline. Optional left inset for
+/// list rows that align the divider under the text (not the leading icon).
 class Hairline extends StatelessWidget {
-  const Hairline({super.key});
+  final double indent;
+  const Hairline({super.key, this.indent = 0});
   @override
-  Widget build(BuildContext context) =>
-      Container(height: Metrics.divider, color: Palette.hairline);
+  Widget build(BuildContext context) => Padding(
+        padding: EdgeInsets.only(left: indent),
+        child: Container(height: Metrics.divider, color: Palette.hairline),
+      );
+}
+
+/// The one tonal icon chip — a rounded square tinted toward [color] with a
+/// centred glyph. Use this everywhere a settings/list row needs a leading icon
+/// badge so all icon chips share a fill, size and corner; never hand-roll one.
+class IconChip extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final double size;
+  const IconChip(this.icon, {super.key, required this.color, this.size = 34});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: size,
+        height: size,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.16),
+          borderRadius: BorderRadius.circular(Metrics.cornerChip),
+        ),
+        child: Icon(icon, size: size * 0.5, color: color),
+      );
 }
 
 /// Small rounded pill badge (status / tag).

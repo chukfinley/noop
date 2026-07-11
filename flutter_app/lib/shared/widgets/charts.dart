@@ -107,40 +107,6 @@ class _SparkPainter extends CustomPainter {
   bool shouldRepaint(_SparkPainter old) => old.values != values || old.color != color;
 }
 
-/// A horizontal segmented bar (sleep-stage strip / domain breakdown).
-class SegmentBar extends StatelessWidget {
-  final List<SegmentDatum> segments;
-  final double height;
-  const SegmentBar(this.segments, {super.key, this.height = Metrics.segmentBarHeight});
-
-  @override
-  Widget build(BuildContext context) {
-    final total = segments.fold<double>(0, (a, s) => a + s.value);
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(Metrics.cornerBadge),
-      child: SizedBox(
-        height: height,
-        child: Row(
-          children: [
-            for (final s in segments)
-              Expanded(
-                flex: total <= 0 ? 1 : (s.value / total * 1000).round().clamp(1, 1000000),
-                child: Container(color: s.color),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class SegmentDatum {
-  final double value;
-  final Color color;
-  final String? label;
-  const SegmentDatum(this.value, this.color, {this.label});
-}
-
 /// A grouped bar chart column series (trends). Bars tinted along a ramp by value.
 class BarSeries extends StatelessWidget {
   final List<double> values;
