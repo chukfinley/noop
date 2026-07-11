@@ -24,7 +24,9 @@ BoxDecoration floatingSurface({
       ),
       boxShadow: [
         BoxShadow(
-          color: Colors.black.withValues(alpha: shadowAlpha),
+          // Light mode wants a gentle, premium lift — not a heavy dark drop.
+          color: Colors.black.withValues(
+              alpha: Palette.isLight ? shadowAlpha * 0.42 : shadowAlpha),
           blurRadius: blur,
           offset: Offset(0, dy),
         ),

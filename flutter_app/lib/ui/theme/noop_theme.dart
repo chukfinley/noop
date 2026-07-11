@@ -60,6 +60,26 @@ ThemeData buildNoopTheme(PaletteTokens brand, Brightness brightness) {
       surfaceContainerHigh: _noopSurfaces.surfaceHigh,
       surfaceContainerHighest: _noopSurfaces.surfaceHighest,
     );
+  } else {
+    // Light mode → the soft Apple-Health canvas: a cool light-grey scaffold with
+    // white containers so Material widgets (nav bar, sheets, chips, cards) float
+    // as white on light-grey, the brand blue accent, and the light hairlines.
+    scheme = scheme.copyWith(
+      surface: brand.surfaceBase,
+      onSurface: brand.textPrimary,
+      onSurfaceVariant: brand.textSecondary,
+      primary: brand.accent,
+      onPrimary: const Color(0xFFFFFFFF),
+      secondaryContainer: brand.accentMuted,
+      onSecondaryContainer: brand.accentHover,
+      outlineVariant: brand.hairline,
+      outline: brand.hairlineStrong,
+      surfaceContainerLowest: brand.surfaceBase,
+      surfaceContainerLow: const Color(0xFFF3F4F6),
+      surfaceContainer: brand.surfaceRaised,
+      surfaceContainerHigh: brand.surfaceRaised,
+      surfaceContainerHighest: const Color(0xFFFFFFFF),
+    );
   }
   // The brand tokens ARE the Noop design (chrome + data) — use them directly for
   // every custom widget/painter; the scheme above only dresses Material widgets.

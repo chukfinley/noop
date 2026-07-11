@@ -16,9 +16,9 @@ class Metrics {
   static const space18 = 18.0;
   static const space20 = 20.0;
   static const space24 = 24.0;
-  static const cardRadius = 22.0;
+  static const cardRadius = 14.0;
   static const cornerXs = 2.0;
-  static const cornerSm = 12.0;
+  static const cornerSm = 9.0;
   static const cornerBadge = 6.0;
   static const cornerPill = 50.0;
   static const cardPadding = 16.0;

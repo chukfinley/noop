@@ -15,6 +15,18 @@ class NoopCard extends StatelessWidget {
   final VoidCallback? onTap;
   final double radius;
 
+  /// When false the hairline ring is dropped (only the soft shadow lifts the
+  /// card off the background) — a cleaner, borderless look.
+  final bool bordered;
+
+  /// When true the corners use an iOS-style continuous "squircle" (a rounded
+  /// superellipse) instead of a plain circular arc.
+  final bool squircle;
+
+  /// Explicit surface fill. Overrides the default raised/accent-tinted fill —
+  /// e.g. to recess a card closer to the background.
+  final Color? fillColor;
+
   const NoopCard({
     super.key,
     required this.child,
@@ -22,20 +34,55 @@ class NoopCard extends StatelessWidget {
     this.accent,
     this.onTap,
     this.radius = Metrics.cardRadius,
+    this.bordered = true,
+    this.squircle = false,
+    this.fillColor,
   });
 
   @override
   Widget build(BuildContext context) {
     final r = BorderRadius.circular(radius);
     final base = Palette.surfaceRaised;
-    final fill = accent == null
-        ? base
-        : Color.alphaBlend(accent!.withValues(alpha: 0.12), base);
+    final fill = fillColor ??
+        (accent == null
+            ? base
+            : Color.alphaBlend(accent!.withValues(alpha: 0.12), base));
+
+    if (squircle) {
+      final shape = RoundedSuperellipseBorder(
+        borderRadius: r,
+        side: bordered
+            ? BorderSide(color: Palette.hairline.withValues(alpha: 0.5), width: 1)
+            : BorderSide.none,
+      );
+      return Pressable(
+        onTap: onTap,
+        borderRadius: r,
+        child: Container(
+          decoration: ShapeDecoration(
+            shape: shape,
+            color: fill,
+            shadows: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: Palette.isLight ? 0.10 : 0.24),
+                blurRadius: 24,
+                offset: const Offset(0, 8),
+              ),
+            ],
+          ),
+          child: ClipPath(
+            clipper: ShapeBorderClipper(shape: shape),
+            child: Padding(padding: padding, child: child),
+          ),
+        ),
+      );
+    }
+
     return Pressable(
       onTap: onTap,
       borderRadius: r,
       child: DecoratedBox(
-        decoration: floatingSurface(radius: radius, fill: fill),
+        decoration: floatingSurface(radius: radius, fill: fill, borderAlpha: bordered ? 0.5 : 0.0),
         child: ClipRRect(
           borderRadius: r,
           child: Padding(padding: padding, child: child),

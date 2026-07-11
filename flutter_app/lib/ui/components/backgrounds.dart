@@ -14,30 +14,7 @@ class ScenicBackground extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Color.lerp(Palette.surfaceBase, Palette.surfaceOverlay, 0.5)!,
-            Palette.surfaceBase,
-          ],
-          stops: const [0.0, 0.55],
-        ),
-      ),
-      child: glow == null
-          ? child
-          : DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  center: const Alignment(0, -0.7),
-                  radius: 1.1,
-                  colors: [glow!.withValues(alpha: 0.06), Colors.transparent],
-                ),
-              ),
-              child: child,
-            ),
-    );
+    // Flat solid canvas — no background gradient, no accent glow.
+    return ColoredBox(color: Palette.surfaceBase, child: child);
   }
 }

@@ -57,6 +57,7 @@ class LiquidVessel extends StatefulWidget {
   final double size;
   final Widget? center;
   final bool animate;
+  final bool showRim;
 
   const LiquidVessel({
     super.key,
@@ -65,6 +66,7 @@ class LiquidVessel extends StatefulWidget {
     this.size = 160,
     this.center,
     this.animate = true,
+    this.showRim = true,
   });
 
   @override
@@ -112,7 +114,7 @@ class _LiquidVesselState extends State<LiquidVessel>
           final now = _c.lastElapsedDuration?.inMicroseconds ?? 0;
           _sim.step(now / 1e6);
           return CustomPaint(
-            painter: _VesselPainter(_sim, tint),
+            painter: _VesselPainter(_sim, tint, widget.showRim),
             child: child,
           );
         },
@@ -125,7 +127,8 @@ class _LiquidVesselState extends State<LiquidVessel>
 class _VesselPainter extends CustomPainter {
   final LiquidSim sim;
   final Color tint;
-  _VesselPainter(this.sim, this.tint);
+  final bool showRim;
+  _VesselPainter(this.sim, this.tint, [this.showRim = true]);
 
   static Color _darker(Color c, double t) =>
       Color.lerp(c, Colors.black, t)!.withValues(alpha: 1);
@@ -135,9 +138,17 @@ class _VesselPainter extends CustomPainter {
     final cx = size.width / 2, cy = size.height / 2;
     final r = math.min(size.width, size.height) / 2 - 1.5;
 
-    // Dark well behind the liquid.
-    canvas.drawCircle(Offset(cx, cy), r,
-        Paint()..color = const Color(0xFF0A0B10).withValues(alpha: 0.55));
+    // Vessel well behind the liquid — a dark recess in dark mode; a pale cool
+    // grey in light mode so the vessel reads as a soft cup on a white card
+    // instead of a dark blob.
+    canvas.drawCircle(
+      Offset(cx, cy),
+      r,
+      Paint()
+        ..color = Palette.isLight
+            ? const Color(0xFFE7EAEF)
+            : const Color(0xFF0A0B10).withValues(alpha: 0.55),
+    );
 
     canvas.save();
     canvas.translate(cx, cy);
@@ -244,25 +255,7 @@ class _VesselPainter extends CustomPainter {
         }
       }
 
-      // Surface line.
-      final line = Path();
-      var first = true;
-      for (double x = -hw; x <= hw; x += 4) {
-        final y = surfaceY(x, hw, sim.p1, sim.p2, 1);
-        if (first) {
-          line.moveTo(x, y);
-          first = false;
-        } else {
-          line.lineTo(x, y);
-        }
-      }
-      canvas.drawPath(
-        line,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.3
-          ..color = Colors.white.withValues(alpha: 0.45),
-      );
+      // (No hard surface line — the waves read as a soft, playful meniscus.)
       canvas.restore();
 
       // Inner top shadow + top-left highlight.
@@ -286,14 +279,16 @@ class _VesselPainter extends CustomPainter {
     canvas.restore();
 
     // Outer rim.
-    canvas.drawCircle(
-      Offset(cx, cy),
-      r,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.25
-        ..color = tint.withValues(alpha: 0.22),
-    );
+    if (showRim) {
+      canvas.drawCircle(
+        Offset(cx, cy),
+        r,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.25
+          ..color = tint.withValues(alpha: 0.22),
+      );
+    }
   }
 
   Shader _vGrad(Offset from, Offset to, List<Color> colors, [List<double>? stops]) =>

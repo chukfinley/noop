@@ -171,9 +171,7 @@ class _DomainDot extends StatelessWidget {
         alignment: Alignment.center,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          gradient: SweepGradient(
-            colors: [domain.deep, domain.bright, domain.deep],
-          ),
+          color: domain.color,
         ),
         child: Container(
           width: 34,

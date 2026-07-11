@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../state/prefs.dart';
 import '../../state/providers.dart';
 import '../components/backgrounds.dart';
 import '../components/common.dart';
@@ -33,11 +34,16 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     super.dispose();
   }
 
+  void _complete() {
+    Prefs.instance.setOnboarded(true);
+    ref.read(onboardedProvider.notifier).state = true;
+  }
+
   void _next() {
     if (_page < _slides.length - 1) {
       _controller.nextPage(duration: Motion.durationStandard, curve: Motion.easeInOut);
     } else {
-      ref.read(onboardedProvider.notifier).state = true;
+      _complete();
     }
   }
 
@@ -52,7 +58,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               Align(
                 alignment: Alignment.topRight,
                 child: TextButton(
-                  onPressed: () => ref.read(onboardedProvider.notifier).state = true,
+                  onPressed: _complete,
                   child: Text('Skip',
                       style: NoopType.subhead.copyWith(color: Palette.textTertiary)),
                 ),

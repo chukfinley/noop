@@ -5,7 +5,10 @@ import 'package:google_fonts/google_fonts.dart';
 
 import 'package:noop/main.dart';
 import 'package:noop/state/providers.dart';
+import 'package:noop/state/format.dart';
 import 'package:noop/data/repository.dart';
+import 'package:noop/data/real_repository.dart';
+import 'package:noop/ui/screens/sleep_screen.dart';
 import 'package:noop/analytics/engines.dart';
 import 'package:noop/analytics/baselines.dart';
 
@@ -32,8 +35,61 @@ void main() {
     // All four tab screens are mounted at once (offstage) — their titles exist.
     expect(find.text('Trends', skipOffstage: false), findsWidgets);
     expect(find.text('Sleep', skipOffstage: false), findsWidgets);
-    expect(find.text('More', skipOffstage: false), findsWidgets);
+    expect(find.text('Settings', skipOffstage: false), findsWidgets);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Sleep screen reflects the selected day (not hard-coded)', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final days = container.read(daysProvider);
+    final iA = 10, iB = days.length - 5;
+    final dayA = days[iA], dayB = days[iB];
+    expect(dayA.date, isNot(dayB.date)); // the two days must differ
+
+    await tester.pumpWidget(UncontrolledProviderScope(
+      container: container,
+      child: const MaterialApp(home: SleepScreen()),
+    ));
+
+    container.read(selectedDayIndexProvider.notifier).state = iA;
+    await tester.pump(const Duration(seconds: 1));
+    // The day-nav strip shows the selected day's date.
+    expect(find.text(Fmt.shortDate(dayA.date)), findsWidgets);
+    // The Sleep hero must show the SAME sleep score as the home screen
+    // (DayRecord.rest), not the raw asleep/need ratio (sleep.performance).
+    expect(find.text(dayA.rest.round().toString()), findsWidgets);
+
+    container.read(selectedDayIndexProvider.notifier).state = iB;
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text(Fmt.shortDate(dayB.date)), findsWidgets);
+    expect(find.text(Fmt.shortDate(dayA.date)), findsNothing); // switched away
+  });
+
+  testWidgets('Sleep screen keeps its header (back nav) on a no-sleep day', (tester) async {
+    // Real capture has some days with no staged sleep — the header must still
+    // render there so you can navigate back.
+    final repo = await RealRepository.load();
+    final container =
+        ProviderContainer(overrides: [repositoryProvider.overrideWithValue(repo)]);
+    addTearDown(container.dispose);
+    final days = container.read(daysProvider);
+    final idx = days.indexWhere((d) => d.sleep == null);
+    expect(idx, greaterThanOrEqualTo(0), reason: 'real data should contain a no-sleep day');
+
+    container.read(selectedDayIndexProvider.notifier).state = idx;
+    await tester.pumpWidget(UncontrolledProviderScope(
+      container: container,
+      child: const MaterialApp(home: SleepScreen()),
+    ));
+    await tester.pump(const Duration(seconds: 1));
+
+    final d = days[idx];
+    expect(find.text('No sleep recorded for this day.'), findsOneWidget);
+    // Header + day-nav (date) still present → the screen is navigable, not a
+    // dead end.
+    expect(find.text(Fmt.shortDate(d.date)), findsWidgets);
+    expect(find.text('Sleep'), findsWidgets);
   });
 
   testWidgets('onboarding shows first, Get started enters the shell', (tester) async {

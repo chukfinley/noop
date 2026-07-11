@@ -4,6 +4,7 @@ import '../data/repository.dart';
 import '../data/models.dart';
 import '../ui/theme/noop_theme.dart';
 import '../ui/theme/palette.dart';
+import 'prefs.dart';
 
 /// The data seam. Swap [MockRepository] for a Kotlin-native platform-channel
 /// implementation without touching any screen.
@@ -43,4 +44,9 @@ final appearanceProvider =
 final chartStyleProvider = StateProvider<ChartStyle>((ref) => ChartStyle.titanium);
 
 /// Whether the intro/onboarding has been completed (gates the app shell).
-final onboardedProvider = StateProvider<bool>((ref) => false);
+/// Seeded from [Prefs] so a completed onboarding persists across launches.
+final onboardedProvider = StateProvider<bool>((ref) => Prefs.instance.onboarded);
+
+/// Score-dial rendering style (liquid vessel vs arc ring). Persisted.
+final gaugeStyleProvider =
+    StateProvider<GaugeStyle>((ref) => Prefs.instance.gaugeStyle);

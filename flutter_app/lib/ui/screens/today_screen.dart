@@ -1,3 +1,5 @@
+import 'dart:ui' show ImageFilter;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,12 +10,17 @@ import '../components/backgrounds.dart';
 import '../components/behavior.dart';
 import '../components/cards.dart';
 import '../components/charts.dart';
-import '../components/common.dart';
+import '../components/coming_soon.dart';
+import '../components/health_charts.dart';
 import '../components/liquid.dart';
+import '../components/metric_gauge.dart';
 import '../components/motion.dart';
 import '../components/tiles.dart';
 import '../theme/metrics.dart';
 import '../theme/palette.dart';
+import 'device_settings_screen.dart';
+import 'metric_detail_screen.dart';
+import 'sleep_screen.dart';
 
 /// Home — a flattened Material 3 rebuild of the shipping Liquid Today: the
 /// scene header + NOOP wordmark + the three water gauges (Charge · Effort · Rest),
@@ -27,7 +34,9 @@ class TodayScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final days = ref.watch(daysProvider);
-    final day = days.last;
+    final maxI = days.length - 1;
+    final idx = ref.watch(selectedDayIndexProvider).clamp(0, maxI);
+    final day = days[idx];
     final media = MediaQuery.of(context);
 
     List<double> tail(double Function(DayRecord) f, [int n = 14]) =>
@@ -51,33 +60,29 @@ class TodayScreen extends ConsumerWidget {
           children: [
             reveal(_Scene(
               day: day,
-              name: ref.watch(profileProvider).name,
               battery: ref.watch(strapBatteryProvider),
-              onAdd: () => _quickActions(context),
+              isToday: idx == maxI,
+              canPrev: idx > 0,
+              canNext: idx < maxI,
+              onPrev: () =>
+                  ref.read(selectedDayIndexProvider.notifier).state = idx - 1,
+              onNext: () =>
+                  ref.read(selectedDayIndexProvider.notifier).state = idx + 1,
             )),
             const SizedBox(height: Metrics.space16),
             reveal(_Hero(day: day)),
             const SizedBox(height: Metrics.space24),
-            reveal(_HeartRate(day: day)),
+            reveal(_head('Stress & Energy')),
+            reveal(_StressEnergy(day: day)),
             const SizedBox(height: Metrics.space24),
             reveal(_head('Your cards', trailing: 'Customise')),
-            reveal(_YourCards(day: day)),
-            const SizedBox(height: Metrics.space24),
-            reveal(_Synthesis(day: day, name: ref.watch(profileProvider).name)),
+            reveal(_YourCards(day: day, tail: tail)),
             const SizedBox(height: Metrics.space24),
             reveal(_head('Recovery vitals')),
             reveal(_RecoveryVitals(day: day, tail: tail)),
             const SizedBox(height: Metrics.space24),
             reveal(_head('Key metrics', trailing: '14-day trend')),
             reveal(_KeyMetrics(day: day, tail: tail)),
-            if (day.workouts.isNotEmpty) ...[
-              const SizedBox(height: Metrics.space24),
-              reveal(_head('Last workouts', trailing: '${day.workouts.length} total')),
-              for (final w in day.workouts) reveal(_WorkoutRow(w)),
-            ],
-            const SizedBox(height: Metrics.space24),
-            reveal(_head('Data sources', trailing: 'Provenance')),
-            reveal(_DataSources(battery: ref.watch(strapBatteryProvider))),
           ],
         ),
       ),
@@ -100,104 +105,116 @@ class TodayScreen extends ConsumerWidget {
         ),
       );
 
-  static void _quickActions(BuildContext context) {
-    showNoopSheet<void>(
-      context,
-      title: 'Quick actions',
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final a in const [
-            (Icons.favorite_rounded, 'Live heart rate'),
-            (Icons.fitness_center_rounded, 'Start workout'),
-            (Icons.edit_note_rounded, 'Log journal'),
-            (Icons.self_improvement_rounded, 'Breathe'),
-          ])
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(a.$1, color: Palette.accent),
-              title: Text(a.$2, style: TextStyle(color: Palette.textPrimary)),
-              trailing: Icon(Icons.chevron_right_rounded, color: Palette.textTertiary),
-              onTap: () => Navigator.of(context).pop(),
-            ),
-        ],
-      ),
-    );
-  }
 }
 
-/// Header row (day title + date + controls) and the centred NOOP wordmark.
+/// Header row — day title + date on the left, two matching status pills on the
+/// right: a live heart-rate pill and the strap battery, both the same shape so
+/// they read as a proportional pair.
 class _Scene extends StatelessWidget {
   final DayRecord day;
-  final String name;
   final double battery;
-  final VoidCallback onAdd;
-  const _Scene({required this.day, required this.name, required this.battery, required this.onAdd});
+  final bool isToday;
+  final bool canPrev;
+  final bool canNext;
+  final VoidCallback onPrev;
+  final VoidCallback onNext;
+  const _Scene({
+    required this.day,
+    required this.battery,
+    required this.isToday,
+    required this.canPrev,
+    required this.canNext,
+    required this.onPrev,
+    required this.onNext,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+        // Left: live heart rate.
+        _HeartRatePill(day: day),
+        // Centre: the day, with prev/next switches.
+        Expanded(
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _NavArrow(icon: Icons.chevron_left_rounded, enabled: canPrev, onTap: onPrev),
+              Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(Fmt.dayTitle(day.date),
-                      style: NoopType.display(28).copyWith(color: Palette.textPrimary)),
-                  Text(Fmt.longDate(day.date),
-                      style: NoopType.subhead.copyWith(color: Palette.textTertiary)),
+                  Text(
+                    isToday ? 'TODAY' : Fmt.dayTitle(day.date).toUpperCase(),
+                    style: NoopType.overline
+                        .copyWith(color: Palette.textPrimary, letterSpacing: 1.4),
+                  ),
+                  Text(Fmt.shortDate(day.date),
+                      style: NoopType.footnote.copyWith(color: Palette.textTertiary)),
                 ],
               ),
-            ),
-            _CircleButton(
-              icon: Icons.favorite_rounded,
-              color: Palette.chargeColor,
-              onTap: () {},
-            ),
-            const SizedBox(width: Metrics.space8),
-            _Avatar(name: name),
-            const SizedBox(width: Metrics.space8),
-            _CircleButton(icon: Icons.add_rounded, color: Palette.textPrimary, onTap: onAdd),
-            const SizedBox(width: Metrics.space8),
-            _StrapBattery(level: battery),
-          ],
+              _NavArrow(icon: Icons.chevron_right_rounded, enabled: canNext, onTap: onNext),
+            ],
+          ),
         ),
-        const SizedBox(height: Metrics.space20),
-        Center(
-          child: Text('NOOP',
-              style: NoopType.overline.copyWith(
-                color: Palette.textSecondary.withValues(alpha: 0.55),
-                letterSpacing: 6,
-                fontSize: 13,
-              )),
+        // Right: strap charge — opens device settings.
+        GestureDetector(
+          onTap: () => Navigator.of(context)
+              .push(noopRoute(const DeviceSettingsScreen())),
+          child: _StrapBattery(level: battery),
         ),
       ],
     );
   }
 }
 
-class _CircleButton extends StatelessWidget {
+/// A subtle chevron used to page between days; dimmed when at a boundary.
+class _NavArrow extends StatelessWidget {
   final IconData icon;
-  final Color color;
+  final bool enabled;
   final VoidCallback onTap;
-  const _CircleButton({required this.icon, required this.color, required this.onTap});
+  const _NavArrow({required this.icon, required this.enabled, required this.onTap});
 
   @override
-  Widget build(BuildContext context) => Material(
+  Widget build(BuildContext context) {
+    return IconButton(
+      onPressed: enabled ? onTap : null,
+      visualDensity: VisualDensity.compact,
+      icon: Icon(icon,
+          size: 22,
+          color: enabled ? Palette.textSecondary : Palette.textTertiary.withValues(alpha: 0.4)),
+    );
+  }
+}
+
+
+/// Live heart-rate pill — same silhouette as the battery pill (a heart glyph +
+/// the current bpm), so the header pair stays visually balanced.
+class _HeartRatePill extends StatelessWidget {
+  final DayRecord day;
+  const _HeartRatePill({required this.day});
+
+  @override
+  Widget build(BuildContext context) {
+    final bpm = day.hr.isEmpty ? null : day.hr.last.bpm.round();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
         color: Palette.surfaceOverlay.withValues(alpha: 0.5),
-        shape: CircleBorder(
-          side: BorderSide(color: Palette.hairline.withValues(alpha: 0.6), width: 1),
-        ),
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onTap,
-          child: SizedBox(width: 36, height: 36, child: Icon(icon, size: 19, color: color)),
-        ),
-      );
+        borderRadius: BorderRadius.circular(Metrics.cornerPill),
+        border: Border.all(color: Palette.hairline.withValues(alpha: 0.6), width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.favorite_rounded, size: 13, color: Palette.metricRose),
+          const SizedBox(width: 5),
+          Text(bpm == null ? '--' : '$bpm',
+              style: NoopType.captionNumber.copyWith(color: Palette.textSecondary)),
+        ],
+      ),
+    );
+  }
 }
 
 /// WHOOP-style strap battery pill.
@@ -212,13 +229,21 @@ class _StrapBattery extends StatelessWidget {
         ? Palette.statusPositive
         : (l > 0.15 ? Palette.statusWarning : Palette.statusCritical);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
       decoration: BoxDecoration(
         color: Palette.surfaceOverlay.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(Metrics.cornerPill),
         border: Border.all(color: Palette.hairline.withValues(alpha: 0.6), width: 1),
       ),
-      child: _BatteryGlyph(level: l, color: color),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _BatteryGlyph(level: l, color: color),
+          const SizedBox(width: 5),
+          Text('${(l * 100).round()}',
+              style: NoopType.captionNumber.copyWith(color: Palette.textSecondary)),
+        ],
+      ),
     );
   }
 }
@@ -272,353 +297,473 @@ class _BatteryGlyph extends StatelessWidget {
   }
 }
 
-class _Avatar extends StatelessWidget {
-  final String name;
-  const _Avatar({required this.name});
-  @override
-  Widget build(BuildContext context) {
-    final stops = Palette.titaniumGradient;
-    return Container(
-      width: 36,
-      height: 36,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: Palette.gradientColors(stops),
-          stops: Palette.gradientPositions(stops),
-        ),
-      ),
-      child: Text(name.isEmpty ? '?' : name.characters.first.toUpperCase(),
-          style: NoopType.headline.copyWith(color: Palette.titaniumDeep)),
-    );
-  }
-}
-
-/// The three hero water gauges — Charge · Effort · Rest, equal columns.
+/// The three hero water gauges — Charge · Effort · Rest — framed as one floating
+/// frosted-glass panel that echoes the bottom nav bar's language: a translucent
+/// pane over the scenic sky (real backdrop blur), a hairline outline and a soft
+/// drop shadow. The signature liquid gauges stay; a faint top sheen and slim
+/// vertical dividers give it depth without the old per-cell colour boxes.
 class _Hero extends StatelessWidget {
   final DayRecord day;
   const _Hero({required this.day});
 
+  void _open(BuildContext context, MetricKind kind) {
+    // Sleep has its own rich, fully-built screen; the others use the generic
+    // metric detail.
+    final Widget screen = kind == MetricKind.sleep
+        ? const SleepScreen()
+        : MetricDetailScreen(kind: kind);
+    Navigator.of(context).push(noopRoute(Scaffold(body: screen)));
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: Metrics.space16, horizontal: Metrics.space12),
-      decoration: BoxDecoration(
-        color: const Color(0xCC0D0E14),
-        borderRadius: BorderRadius.circular(26),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.11), width: 1),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.45), blurRadius: 30, offset: const Offset(0, 16)),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: _HeroCell(
-              label: 'Charge',
-              value: day.charge,
-              ramp: Palette.recoveryStops,
-              color: Palette.chargeColor,
-              pill: 'WHOOP',
+    return _GlassPanel(
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: _HeroCell(
+                label: 'Recovery',
+                value: day.charge,
+                ramp: Palette.recoveryStops,
+                color: Palette.chargeColor,
+                onTap: () => _open(context, MetricKind.recovery),
+              ),
             ),
-          ),
-          Expanded(
-            child: _HeroCell(
-              label: 'Effort',
-              value: day.effort,
-              ramp: Palette.effortGradientStops,
-              color: Palette.effortColor,
+            const _CellDivider(),
+            Expanded(
+              child: _HeroCell(
+                label: 'Strain',
+                value: day.effort,
+                ramp: Palette.effortGradientStops,
+                color: Palette.effortColor,
+                onTap: () => _open(context, MetricKind.strain),
+              ),
             ),
-          ),
-          Expanded(
-            child: _HeroCell(
-              label: 'Rest',
-              value: day.rest,
-              ramp: Palette.restGradientStops,
-              color: Palette.restColor,
-              pill: 'WHOOP',
+            const _CellDivider(),
+            Expanded(
+              child: _HeroCell(
+                label: 'Sleep',
+                value: day.rest,
+                ramp: Palette.restGradientStops,
+                color: Palette.restColor,
+                onTap: () => _open(context, MetricKind.sleep),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
 
-class _HeroCell extends StatelessWidget {
+/// Floating frosted-glass shell — same visual grammar as the nav bar: soft
+/// shadow lift, thin light hairline, translucent fill, plus a real backdrop
+/// blur so the scenic sky diffuses through it.
+class _GlassPanel extends StatelessWidget {
+  final Widget child;
+  const _GlassPanel({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(40);
+    // Light mode: a clean white card with a soft lift and a subtle hairline —
+    // no dark frost. Dark mode: the translucent frosted pane over the scenic sky.
+    if (Palette.isLight) {
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          color: Palette.surfaceRaised,
+          borderRadius: radius,
+          border: Border.all(color: Palette.hairline.withValues(alpha: 0.8), width: 1),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.08),
+              blurRadius: 24,
+              offset: const Offset(0, 10),
+            ),
+          ],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 6),
+          child: child,
+        ),
+      );
+    }
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: radius,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.34),
+            blurRadius: 30,
+            offset: const Offset(0, 14),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: radius,
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 6),
+            decoration: BoxDecoration(
+              // Flat, uniform frosted fill — no gradient, no outline edge.
+              color: Colors.white.withValues(alpha: 0.08),
+              borderRadius: radius,
+            ),
+            child: child,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Slim inset divider between hero cells.
+class _CellDivider extends StatelessWidget {
+  const _CellDivider();
+  @override
+  Widget build(BuildContext context) => Container(
+        width: 1,
+        margin: const EdgeInsets.symmetric(vertical: 12),
+        color: (Palette.isLight ? Colors.black : Colors.white)
+            .withValues(alpha: Palette.isLight ? 0.06 : 0.08),
+      );
+}
+
+class _HeroCell extends ConsumerWidget {
   final String label;
   final double value;
   final List<Stop> ramp;
   final Color color;
-  final String? pill;
+  final VoidCallback? onTap;
   const _HeroCell({
     required this.label,
     required this.value,
     required this.ramp,
     required this.color,
-    this.pill,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final style = ref.watch(gaugeStyleProvider);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        hoverColor: Colors.transparent,
+        splashColor: Colors.transparent,
+        highlightColor: Colors.transparent,
+        focusColor: Colors.transparent,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              MetricGauge(
+                fraction: (value / 100).clamp(0, 1),
+                ramp: ramp,
+                size: 78,
+                center: Text(value.round().toString(),
+                    style: NoopType.number(24).copyWith(
+                      color: gaugeCenterColor(style),
+                      shadows: gaugeCenterShadows(style),
+                    )),
+              ),
+              const SizedBox(height: Metrics.space12),
+              Text(label.toUpperCase(),
+                  style: NoopType.overline.copyWith(color: color, letterSpacing: 1.6)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// "Stress & Energy" — today's stress with high/low/average + a compact dial,
+/// and an energy (body battery) bar. Mirrors the Noop home section.
+class _StressEnergy extends ConsumerWidget {
+  final DayRecord day;
+  const _StressEnergy({required this.day});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final stress = day.stress;
+    final avg = stress.round();
+    final high = (stress + (100 - stress) * 0.75).clamp(0, 100).round();
+    final low = (stress * 0.3).clamp(0, 100).round();
+    final label = stress < 33 ? 'Low' : (stress < 66 ? 'Med' : 'High');
+    final updated = day.hr.isEmpty ? null : Fmt.clock(day.hr.last.time);
+    final style = ref.watch(gaugeStyleProvider);
+    final centerColor = gaugeCenterColor(style);
+
+    return Column(
+      children: [
+        NoopCard(
+          bordered: false,
+          squircle: true,
+          radius: 36,
+          onTap: () => Navigator.of(context)
+              .push(noopRoute(const MetricDetailScreen(kind: MetricKind.stress))),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                        color: Palette.stressColor, shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: Metrics.space8),
+                  Text("Today's stress",
+                      style: NoopType.headline.copyWith(color: Palette.textPrimary)),
+                  const Spacer(),
+                  Icon(Icons.chevron_right_rounded, color: Palette.textTertiary, size: 20),
+                ],
+              ),
+              // Always reserve this line so switching to a day without HR data
+              // doesn't collapse it and shift the whole card up.
+              const SizedBox(height: 2),
+              Text(updated != null ? 'Last updated at $updated' : ' ',
+                  style: NoopType.caption.copyWith(color: Palette.textTertiary)),
+              const SizedBox(height: Metrics.space16),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: Row(
+                      children: [
+                        _stat('Highest', high, Palette.statusCritical),
+                        _stat('Lowest', low, Palette.metricCyan),
+                        _stat('Average', avg, Palette.chargeColor),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: Metrics.space12),
+                  MetricGauge(
+                    fraction: (stress / 100).clamp(0, 1),
+                    ramp: Palette.stressGradientStops,
+                    size: 66,
+                    center: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('$avg',
+                            style: NoopType.number(18).copyWith(
+                              color: centerColor,
+                              shadows: gaugeCenterShadows(style),
+                            )),
+                        Text(label,
+                            style: NoopType.footnote.copyWith(
+                                color: centerColor.withValues(alpha: 0.75))),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: Metrics.gap),
+        NoopCard(
+          bordered: false,
+          squircle: true,
+          radius: 36,
+          child: Row(
+            children: [
+              Icon(Icons.bolt_rounded, color: Palette.chargeColor, size: 22),
+              const SizedBox(width: Metrics.space12),
+              Expanded(child: _EnergyBar(fraction: (day.vitality / 100).clamp(0, 1))),
+              const SizedBox(width: Metrics.space12),
+              Text('${day.vitality}%',
+                  style: NoopType.number(18).copyWith(color: Palette.textPrimary)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _stat(String label, int value, Color color) => Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('$value', style: NoopType.number(22).copyWith(color: color)),
+            const SizedBox(height: 2),
+            Text(label, style: NoopType.footnote.copyWith(color: Palette.textTertiary)),
+          ],
+        ),
+      );
+}
+
+/// A segmented "body battery" bar filled to [fraction].
+class _EnergyBar extends StatelessWidget {
+  final double fraction;
+  const _EnergyBar({required this.fraction});
+
+  @override
+  Widget build(BuildContext context) {
+    const n = 26;
+    final filled = (fraction * n).round();
+    return Row(
+      children: [
+        for (var i = 0; i < n; i++)
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 0.8),
+              child: Container(
+                height: 16,
+                decoration: BoxDecoration(
+                  color: i < filled ? Palette.chargeColor : Palette.surfaceInset,
+                  borderRadius: BorderRadius.circular(1.5),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// "Your cards" — the three hero scores, each a big card with a detailed,
+/// jagged up/down timeline (à la a sleep timeline). Tapping opens the detail.
+class _YourCards extends StatelessWidget {
+  final DayRecord day;
+  final List<double> Function(double Function(DayRecord), [int]) tail;
+  const _YourCards({required this.day, required this.tail});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        _MetricChartCard(
+          kind: MetricKind.recovery,
+          label: 'Recovery',
+          value: day.charge.round().toString(),
+          unit: '%',
+          state: Palette.recoveryState(day.charge),
+          color: Palette.chargeColor,
+          caption: 'Higher, steadier peaks mean better readiness.',
+          day: day,
+        ),
+        const SizedBox(height: Metrics.gap),
+        _MetricChartCard(
+          kind: MetricKind.strain,
+          label: 'Strain',
+          value: day.effort.round().toString(),
+          unit: '',
+          state: day.effort < 33 ? 'Light' : (day.effort < 66 ? 'Moderate' : 'Strenuous'),
+          color: Palette.effortColor,
+          caption: 'Peaks mark bursts of exertion through the day.',
+          day: day,
+        ),
+        const SizedBox(height: Metrics.gap),
+        _MetricChartCard(
+          kind: MetricKind.sleep,
+          label: 'Sleep timeline',
+          value: day.rest.round().toString(),
+          unit: '%',
+          state: day.rest < 50
+              ? 'Poor'
+              : (day.rest < 70 ? 'Fair' : (day.rest < 85 ? 'Good' : 'Optimal')),
+          color: Palette.restColor,
+          caption: 'Peaks may indicate brief awakenings or stress.',
+          day: day,
+        ),
+      ],
+    );
+  }
+}
+
+/// A big metric card: title + "View" link, current value + state, and a
+/// detailed jagged timeline underneath with a short caption.
+class _MetricChartCard extends StatelessWidget {
+  final MetricKind kind;
+  final String label;
+  final String value;
+  final String unit;
+  final String state;
+  final Color color;
+  final String caption;
+  final DayRecord day;
+  const _MetricChartCard({
+    required this.kind,
+    required this.label,
+    required this.value,
+    required this.unit,
+    required this.state,
+    required this.color,
+    required this.caption,
+    required this.day,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        LiquidVessel(
-          fraction: (value / 100).clamp(0, 1),
-          ramp: ramp,
-          size: 84,
-          center: Text(value.round().toString(),
-              style: NoopType.number(24).copyWith(
-                color: Colors.white,
-                shadows: [const Shadow(color: Colors.black54, blurRadius: 6)],
-              )),
-        ),
-        const SizedBox(height: Metrics.space8),
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(label.toUpperCase(),
-                style: NoopType.overline.copyWith(color: color, letterSpacing: 1.4)),
-            const SizedBox(width: 3),
-            Icon(Icons.chevron_right_rounded, size: 12, color: color.withValues(alpha: 0.6)),
-          ],
-        ),
-        const SizedBox(height: 5),
-        if (pill != null)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2.5),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.05),
-              borderRadius: BorderRadius.circular(Metrics.cornerPill),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.18), width: 1),
-            ),
-            child: Text(pill!,
-                style: NoopType.footnote.copyWith(
-                    color: Palette.textSecondary, fontWeight: FontWeight.w700, letterSpacing: 1.2, fontSize: 8.5)),
-          )
-        else
-          const SizedBox(height: 18),
-      ],
-    );
-  }
-}
-
-class _HeartRate extends StatelessWidget {
-  final DayRecord day;
-  const _HeartRate({required this.day});
-  @override
-  Widget build(BuildContext context) {
-    if (day.hr.isEmpty) return const SizedBox.shrink();
-    final bpm = day.hr.map((s) => s.bpm).toList();
-    final current = bpm.last;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        TodayScreen._head('Heart rate', trailing: 'Live'),
-        NoopCard(
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  Icon(Icons.favorite_rounded, size: 16, color: Palette.metricRose),
-                  const SizedBox(width: 6),
-                  Text('${current.round()}',
-                      style: NoopType.number(22).copyWith(color: Palette.textPrimary)),
-                  const SizedBox(width: 3),
-                  Text('bpm', style: NoopType.caption.copyWith(color: Palette.textTertiary)),
-                  const Spacer(),
-                  Text('Full day', style: NoopType.caption.copyWith(color: Palette.accent)),
-                  Icon(Icons.chevron_right_rounded, size: 16, color: Palette.accent),
-                ],
-              ),
-              const SizedBox(height: Metrics.space10),
-              SizedBox(
-                height: Metrics.compactChartHeight,
-                child: Sparkline(
-                  values: bpm,
-                  color: Palette.metricRose,
-                  width: double.infinity,
-                  height: Metrics.compactChartHeight,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// "Your cards" — the WHOOP-style dashboard rows.
-class _YourCards extends StatelessWidget {
-  final DayRecord day;
-  const _YourCards({required this.day});
-
-  @override
-  Widget build(BuildContext context) {
-    final rows = <_DashRow>[
-      _DashRow(Icons.bolt_rounded, 'STRESS', _stressLabel(day.stress),
-          day.stress.round().toString(), '', Palette.stressColor),
-      _DashRow(Icons.hourglass_bottom_rounded, 'FITNESS AGE', 'estimated',
-          day.fitnessAge.toString(), 'yr', Palette.metricCyan),
-      _DashRow(Icons.local_fire_department_rounded, 'VITALITY', 'today',
-          day.vitality.toString(), '', Palette.chargeColor),
-      _DashRow(Icons.monitor_heart_rounded, 'HRV', 'last night',
-          day.hrv.round().toString(), 'ms', Palette.metricPurple),
-      _DashRow(Icons.favorite_border_rounded, 'RESTING HR', 'last night',
-          day.rhr.round().toString(), 'bpm', Palette.metricRose),
-    ];
+    final (series, axis) = metricTimeline(day, kind);
+    // Recessed fill — halfway between the background and a raised card, so the
+    // cards sit closer to the canvas.
+    final recessed =
+        Color.lerp(Palette.surfaceBase, Palette.surfaceRaised, 0.5)!;
     return NoopCard(
-      padding: EdgeInsets.zero,
-      child: Column(
-        children: [
-          for (var i = 0; i < rows.length; i++) ...[
-            rows[i],
-            if (i != rows.length - 1)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: Metrics.cardPadding),
-                child: const Hairline(),
-              ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  static String _stressLabel(double s) => s < 33 ? 'low' : (s < 66 ? 'medium' : 'high');
-}
-
-class _DashRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String sub;
-  final String value;
-  final String unit;
-  final Color color;
-  const _DashRow(this.icon, this.label, this.sub, this.value, this.unit, this.color);
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: Metrics.cardPadding, vertical: 14),
-      child: Row(
-        children: [
-          Container(
-            width: 34,
-            height: 34,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.14),
-              borderRadius: BorderRadius.circular(Metrics.cornerSm),
-            ),
-            child: Icon(icon, size: 18, color: color),
-          ),
-          const SizedBox(width: Metrics.space12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: NoopType.overline.copyWith(color: Palette.textSecondary)),
-                Text(sub, style: NoopType.footnote.copyWith(color: Palette.textTertiary)),
-              ],
-            ),
-          ),
-          Text(value, style: NoopType.number(22).copyWith(color: Palette.textPrimary)),
-          if (unit.isNotEmpty) ...[
-            const SizedBox(width: 3),
-            Padding(
-              padding: const EdgeInsets.only(bottom: 2),
-              child: Text(unit, style: NoopType.caption.copyWith(color: Palette.textTertiary)),
-            ),
-          ],
-          const SizedBox(width: Metrics.space8),
-          Icon(Icons.chevron_right_rounded, color: Palette.textTertiary, size: 20),
-        ],
-      ),
-    );
-  }
-}
-
-/// Synthesis — a greeting, readiness pills, and a one-line read of the day.
-class _Synthesis extends StatelessWidget {
-  final DayRecord day;
-  final String name;
-  const _Synthesis({required this.day, required this.name});
-
-  @override
-  Widget build(BuildContext context) {
-    final state = Palette.recoveryState(day.charge);
-    final stateColor = Palette.recoveryColor(day.charge);
-    final calibrating = day.hr.length < 4;
-    return SectionCard(
-      title: 'Synthesis',
-      accent: Palette.chargeColor,
+      squircle: true,
+      radius: 36,
+      bordered: false,
+      fillColor: recessed,
+      onTap: () => Navigator.of(context)
+          .push(noopRoute(MetricDetailScreen(kind: kind))),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('${_greeting()}, ${name.isEmpty ? 'Athlete' : name}.',
-              style: NoopType.title2.copyWith(color: Palette.textPrimary)),
-          const SizedBox(height: Metrics.space10),
           Row(
             children: [
-              _pill(state, stateColor, filled: true),
-              const SizedBox(width: Metrics.space8),
-              _pill(calibrating ? 'Calibrating' : 'Solid',
-                  calibrating ? Palette.statusWarning : Palette.chargeColor),
+              Text(label.toUpperCase(),
+                  style: NoopType.overline
+                      .copyWith(color: Palette.textSecondary, letterSpacing: 1.4)),
+              const Spacer(),
+              Text('View', style: NoopType.footnote.copyWith(color: color)),
+              Icon(Icons.chevron_right_rounded, color: color, size: 18),
             ],
           ),
-          const SizedBox(height: Metrics.space12),
-          Text(_summary(),
-              style: NoopType.body.copyWith(color: Palette.textSecondary, height: 1.4)),
+          const SizedBox(height: Metrics.space10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(value,
+                  style: NoopType.number(30).copyWith(color: Palette.textPrimary)),
+              if (unit.isNotEmpty) ...[
+                const SizedBox(width: 2),
+                Text(unit,
+                    style: NoopType.subhead.copyWith(color: Palette.textTertiary)),
+              ],
+              const SizedBox(width: Metrics.space10),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 3),
+                child: Text(state.toUpperCase(),
+                    style: NoopType.footnote
+                        .copyWith(color: color, fontWeight: FontWeight.w700)),
+              ),
+            ],
+          ),
+          const SizedBox(height: Metrics.space16),
+          HealthTimeline(
+            values: series,
+            color: color,
+            axisLabels: axis,
+            height: 130,
+          ),
+          const SizedBox(height: Metrics.space10),
+          Text(caption,
+              style: NoopType.footnote.copyWith(color: Palette.textTertiary)),
         ],
       ),
     );
   }
-
-  String _greeting() {
-    final h = DateTime.now().hour;
-    if (h < 12) return 'Good morning';
-    if (h < 18) return 'Good afternoon';
-    return 'Good evening';
-  }
-
-  String _summary() {
-    final c = day.charge.round();
-    final restrained = day.charge < 50;
-    final base = 'Charge is $c%, ${Palette.recoveryState(day.charge).toLowerCase()}. '
-        'HRV ${day.hrv.round()} ms · resting HR ${day.rhr.round()} bpm.';
-    return restrained
-        ? '$base Keep effort moderate and prioritise rest today.'
-        : '$base You have headroom for a harder session.';
-  }
-
-  Widget _pill(String text, Color color, {bool filled = false}) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: filled ? 0.16 : 0.0),
-          borderRadius: BorderRadius.circular(Metrics.cornerPill),
-          border: Border.all(color: color.withValues(alpha: 0.45), width: 1),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 6,
-              height: 6,
-              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-            ),
-            const SizedBox(width: 6),
-            Text(text.toUpperCase(),
-                style: NoopType.footnote.copyWith(
-                    color: color, fontWeight: FontWeight.bold, letterSpacing: 0.8)),
-          ],
-        ),
-      );
 }
 
 class _RecoveryVitals extends StatelessWidget {
@@ -636,9 +781,6 @@ class _RecoveryVitals extends StatelessWidget {
           const SizedBox(height: Metrics.space14),
           _vital('Resting heart rate', '${day.rhr.round()}', 'bpm',
               tail((d) => d.rhr), Palette.metricRose),
-          const SizedBox(height: Metrics.space14),
-          _vital('Respiratory rate', day.respiratoryRate.toStringAsFixed(1), 'rpm',
-              tail((d) => d.respiratoryRate), Palette.accent),
         ],
       ),
     );
@@ -678,27 +820,6 @@ class _KeyMetrics extends StatelessWidget {
       columns: 3,
       [
         MetricTile(
-          label: 'Recovery',
-          value: day.charge.round().toString(),
-          unit: '%',
-          spark: tail((d) => d.charge),
-          sparkRamp: Palette.recoveryStops,
-          accent: Palette.chargeColor,
-        ),
-        MetricTile(
-          label: 'Strain',
-          value: day.effort.round().toString(),
-          spark: tail((d) => d.effort),
-          accent: Palette.effortColor,
-        ),
-        MetricTile(
-          label: 'Sleep',
-          value: day.rest.round().toString(),
-          unit: '%',
-          spark: tail((d) => d.rest),
-          accent: Palette.restColor,
-        ),
-        MetricTile(
           label: 'HRV',
           value: day.hrv.round().toString(),
           unit: 'ms',
@@ -711,93 +832,25 @@ class _KeyMetrics extends StatelessWidget {
           spark: tail((d) => d.rhr),
           accent: Palette.metricRose,
         ),
+        // No real steps source yet — a planned placeholder, not a fake count.
+        const ComingSoonTile(label: 'Steps', icon: Icons.directions_walk_rounded),
         MetricTile(
-          label: 'Steps',
-          value: Fmt.intComma(day.steps),
-          spark: tail((d) => d.steps.toDouble()),
-          accent: Palette.metricPurple,
+          label: 'Stress',
+          value: day.stress.round().toString(),
+          spark: tail((d) => d.stress),
+          accent: Palette.stressColor,
         ),
+        MetricTile(
+          label: 'Vitality',
+          value: day.vitality.toString(),
+          spark: tail((d) => d.vitality.toDouble()),
+          accent: Palette.chargeColor,
+        ),
+        // Fitness age has no real source yet.
+        const ComingSoonTile(
+            label: 'Fitness age', icon: Icons.cake_rounded),
       ],
     );
   }
 }
 
-class _WorkoutRow extends StatelessWidget {
-  final Workout w;
-  const _WorkoutRow(this.w);
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(top: Metrics.gap),
-      child: NoopCard(
-        accent: Palette.effortColor,
-        child: Row(
-          children: [
-            Icon(Icons.fitness_center_rounded, color: Palette.effortColor, size: 22),
-            const SizedBox(width: Metrics.space12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(w.sport, style: NoopType.headline.copyWith(color: Palette.textPrimary)),
-                  Text('${Fmt.hm(w.duration)} · ${w.calories} kcal · ${w.avgHr.round()} bpm avg',
-                      style: NoopType.caption.copyWith(color: Palette.textTertiary)),
-                ],
-              ),
-            ),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(w.effort.toStringAsFixed(1),
-                    style: NoopType.number(20).copyWith(color: Palette.effortColor)),
-                Text('effort', style: NoopType.footnote.copyWith(color: Palette.textTertiary)),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Data sources — provenance + the strap battery row.
-class _DataSources extends StatelessWidget {
-  final double battery;
-  const _DataSources({required this.battery});
-
-  @override
-  Widget build(BuildContext context) {
-    return NoopCard(
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Icon(Icons.cloud_done_rounded, size: 20, color: Palette.accent),
-              const SizedBox(width: Metrics.space12),
-              Expanded(
-                child: Text('Synced from on-device sensors',
-                    style: NoopType.body.copyWith(color: Palette.textSecondary)),
-              ),
-              Text('View sources', style: NoopType.caption.copyWith(color: Palette.accent)),
-              Icon(Icons.chevron_right_rounded, size: 16, color: Palette.accent),
-            ],
-          ),
-          const SizedBox(height: Metrics.space12),
-          const Hairline(),
-          const SizedBox(height: Metrics.space12),
-          Row(
-            children: [
-              Icon(Icons.watch_rounded, size: 20, color: Palette.textTertiary),
-              const SizedBox(width: Metrics.space12),
-              Expanded(
-                child: Text('Strap battery',
-                    style: NoopType.body.copyWith(color: Palette.textSecondary)),
-              ),
-              _StrapBattery(level: battery),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
