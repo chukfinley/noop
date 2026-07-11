@@ -143,14 +143,6 @@ class _MetricTrendScreenState extends State<MetricTrendScreen> {
               child: Text(title,
                   style: NoopType.title2.copyWith(color: Palette.textPrimary)),
             ),
-            IconButton(
-              icon: Icon(Icons.add_rounded, color: Palette.textPrimary),
-              onPressed: () {},
-            ),
-            IconButton(
-              icon: Icon(Icons.more_vert_rounded, color: Palette.textPrimary),
-              onPressed: () {},
-            ),
           ],
         ),
       );
@@ -241,7 +233,9 @@ class _MetricTrendScreenState extends State<MetricTrendScreen> {
         decoration: BoxDecoration(
           color: Palette.surfaceRaised,
           borderRadius: BorderRadius.vertical(
-            top: rows.isEmpty ? const Radius.circular(18) : Radius.zero,
+            top: rows.isEmpty
+                ? const Radius.circular(Metrics.cornerLarge)
+                : Radius.zero,
           ),
           border: Border(
             bottom: BorderSide(color: Palette.surfaceBase, width: 2),
@@ -260,7 +254,7 @@ class _MetricTrendScreenState extends State<MetricTrendScreen> {
       ));
     }
     return ClipRRect(
-      borderRadius: BorderRadius.circular(18),
+      borderRadius: BorderRadius.circular(Metrics.cornerLarge),
       child: Column(children: rows),
     );
   }

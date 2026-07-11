@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:noop/core/data/models.dart';
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/shared/widgets/behavior.dart';
+import 'package:noop/shared/widgets/cards.dart';
 import 'package:noop/shared/widgets/coming_soon.dart';
 import 'package:noop/shared/widgets/health_charts.dart';
 import 'package:noop/core/theme/metrics.dart';
@@ -202,7 +203,8 @@ class TrendsScreen extends ConsumerWidget {
             _Header(initial: profile.name.isEmpty ? 'A' : profile.name[0]),
             Expanded(
               child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
+                padding: const EdgeInsets.fromLTRB(
+                    Metrics.space16, Metrics.space8, Metrics.space16, 120),
                 children: [
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -213,16 +215,16 @@ class TrendsScreen extends ConsumerWidget {
                                 .copyWith(color: Palette.textPrimary)),
                       ),
                       Padding(
-                        padding: const EdgeInsets.only(top: 6),
+                        padding: const EdgeInsets.only(top: Metrics.space6),
                         child: Text('Customise',
                             style: NoopType.body.copyWith(color: Palette.accent)),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: Metrics.space16),
                   for (var i = 0; i < metrics.length; i += 2)
                     Padding(
-                      padding: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.only(bottom: Metrics.space12),
                       child: IntrinsicHeight(
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -232,7 +234,7 @@ class TrendsScreen extends ConsumerWidget {
                                     metric: metrics[i],
                                     labels: labels7,
                                     n: last7)),
-                            const SizedBox(width: 12),
+                            const SizedBox(width: Metrics.space12),
                             Expanded(
                               child: i + 1 < metrics.length
                                   ? _MetricCard(
@@ -260,7 +262,8 @@ class _Header extends StatelessWidget {
   const _Header({required this.initial});
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        padding: const EdgeInsets.fromLTRB(
+            Metrics.space16, Metrics.space8, Metrics.space16, Metrics.space8),
         child: Row(
           children: [
             Icon(Icons.devices_other_rounded,
@@ -309,77 +312,69 @@ class _MetricCard extends StatelessWidget {
       return ComingSoonTile(
         label: metric.title,
         icon: _iconFor(metric.title),
-        radius: 28,
+        radius: Metrics.cornerLarge,
       );
     }
     final values = metric.lastN(n);
-    // M3-Expressive: a tonal tinted surface, large 28dp rounding, compact.
-    final fill = Color.alphaBlend(
-        metric.color.withValues(alpha: 0.10), Palette.surfaceRaised);
-    return Material(
-      color: fill,
-      borderRadius: BorderRadius.circular(28),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => Navigator.of(context)
-            .push(noopRoute(MetricTrendScreen(metric: metric))),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    // Tonal tinted surface via NoopCard's accent fill (accent@0.12).
+    return NoopCard(
+      accent: metric.color,
+      radius: Metrics.cornerLarge,
+      padding: const EdgeInsets.all(Metrics.space14),
+      onTap: () => Navigator.of(context)
+          .push(noopRoute(MetricTrendScreen(metric: metric))),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(metric.title,
+              style: NoopType.footnote.copyWith(color: Palette.textSecondary)),
+          const SizedBox(height: 2),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
             children: [
-              Text(metric.title,
-                  style: NoopType.footnote
-                      .copyWith(color: Palette.textSecondary)),
-              const SizedBox(height: 2),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.baseline,
-                textBaseline: TextBaseline.alphabetic,
-                children: [
-                  Flexible(
-                    child: Text(metric.valueText,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: NoopType.number(22)
-                            .copyWith(color: Palette.textPrimary)),
-                  ),
-                  if (metric.unit.isNotEmpty) ...[
-                    const SizedBox(width: 3),
-                    Text(metric.unit,
-                        style: NoopType.caption
-                            .copyWith(color: Palette.textTertiary)),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 12),
-              metric.chart == TrendChart.bars
-                  ? HealthMiniBars(
-                      values: values,
-                      labels: labels,
-                      color: metric.color,
-                      height: 44)
-                  : HealthMiniLine(
-                      values: values,
-                      labels: labels,
-                      color: metric.color,
-                      height: 44),
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: metric.color.withValues(alpha: 0.16),
-                  borderRadius: BorderRadius.circular(Metrics.cornerPill),
-                ),
-                child: Text(metric.status,
+              Flexible(
+                child: Text(metric.valueText,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: NoopType.caption.copyWith(
-                        color: Palette.textPrimary,
-                        fontWeight: FontWeight.w600)),
+                    style: NoopType.number(22)
+                        .copyWith(color: Palette.textPrimary)),
               ),
+              if (metric.unit.isNotEmpty) ...[
+                const SizedBox(width: 3),
+                Text(metric.unit,
+                    style: NoopType.caption
+                        .copyWith(color: Palette.textTertiary)),
+              ],
             ],
           ),
-        ),
+          const SizedBox(height: 12),
+          metric.chart == TrendChart.bars
+              ? HealthMiniBars(
+                  values: values,
+                  labels: labels,
+                  color: metric.color,
+                  height: 44)
+              : HealthMiniLine(
+                  values: values,
+                  labels: labels,
+                  color: metric.color,
+                  height: 44),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: metric.color.withValues(alpha: 0.16),
+              borderRadius: BorderRadius.circular(Metrics.cornerPill),
+            ),
+            child: Text(metric.status,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: NoopType.caption.copyWith(
+                    color: Palette.textPrimary,
+                    fontWeight: FontWeight.w600)),
+          ),
+        ],
       ),
     );
   }

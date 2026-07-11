@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:noop/core/state/prefs.dart';
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/shared/widgets/behavior.dart';
+import 'package:noop/shared/widgets/common.dart';
 import 'package:noop/shared/widgets/controls.dart';
 import 'package:noop/shared/widgets/scaffold.dart';
 import 'package:noop/core/theme/metrics.dart';
@@ -139,7 +140,8 @@ Future<void> _editNumber(
         TextButton(
             onPressed: () => Navigator.pop(ctx),
             child: Text('Cancel',
-                style: TextStyle(color: Palette.textSecondary))),
+                style:
+                    NoopType.body.copyWith(color: Palette.textSecondary))),
         FilledButton(
           onPressed: () {
             final v = double.tryParse(ctrl.text.trim().replaceAll(',', '.'));
@@ -499,8 +501,8 @@ class _ConnectedGroup extends StatelessWidget {
   final List<Widget Function(BorderRadius radius)> tiles;
   const _ConnectedGroup(this.tiles);
 
-  static const double _outer = 26;
-  static const double _inner = 6;
+  static const double _outer = Metrics.cornerLarge;
+  static const double _inner = Metrics.cornerBadge;
   static const double _gap = 3;
 
   @override
@@ -522,26 +524,6 @@ class _ConnectedGroup extends StatelessWidget {
 }
 
 // ── Row / tile primitives ───────────────────────────────────────────────────
-
-/// A tonal icon chip: a rounded-square filled with the icon's colour at low
-/// alpha, the icon itself in the full colour.
-class _IconChip extends StatelessWidget {
-  final IconData icon;
-  final Color color;
-  const _IconChip({required this.icon, required this.color});
-
-  @override
-  Widget build(BuildContext context) => Container(
-        width: 32,
-        height: 32,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Icon(icon, size: 17, color: color),
-      );
-}
 
 /// A single filled setting tile: a leading tonal icon chip, a title (+ optional
 /// detail line) and a trailing control. Its own filled surface, shaped by the
@@ -573,7 +555,7 @@ class _Tile extends StatelessWidget {
       child: Row(
         children: [
           if (icon != null) ...[
-            _IconChip(icon: icon!, color: color),
+            IconChip(icon!, color: color),
             const SizedBox(width: Metrics.space12),
           ],
           Expanded(

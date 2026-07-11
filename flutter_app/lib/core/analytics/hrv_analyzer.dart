@@ -96,8 +96,9 @@ class HrvAnalyzer {
     var n = 0;
     for (var i = 1; i < nn.length; i++) {
       final d = nn[i] - nn[i - 1];
-      if (maxSuccessiveDiffMs != null && d.abs() > maxSuccessiveDiffMs)
+      if (maxSuccessiveDiffMs != null && d.abs() > maxSuccessiveDiffMs) {
         continue;
+      }
       sumSq += d * d;
       n++;
     }

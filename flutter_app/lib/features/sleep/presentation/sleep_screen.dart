@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:noop/core/data/models.dart';
 import 'package:noop/core/state/format.dart';
 import 'package:noop/core/state/providers.dart';
+import 'package:noop/shared/widgets/cards.dart';
 import 'package:noop/shared/widgets/health_charts.dart';
 import 'package:noop/shared/widgets/metric_gauge.dart';
 import 'package:noop/shared/widgets/scaffold.dart';
@@ -295,9 +296,10 @@ class _TimelineCard extends StatelessWidget {
     }
     final hlColor = selected == null ? null : _stageColor(selected!);
 
-    return _card(
+    return SectionCard(
       title: 'SLEEP TIMELINE',
-      action: selected == null ? 'View stages' : 'Clear',
+      trailing: Text(selected == null ? 'View stages' : 'Clear',
+          style: NoopType.footnote.copyWith(color: Palette.restColor)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -350,9 +352,10 @@ class _StagesCard extends StatelessWidget {
     final total = sleep.awake + sleep.light + sleep.deep + sleep.rem;
     final t = total.inMinutes == 0 ? 1 : total.inMinutes;
     int pct(Duration d) => (d.inMinutes / t * 100).round();
-    return _card(
+    return SectionCard(
       title: 'SLEEP STAGES',
-      action: 'Tap a stage',
+      trailing: Text('Tap a stage',
+          style: NoopType.footnote.copyWith(color: Palette.restColor)),
       child: Column(
         children: [
           _row('Awake', pct(sleep.awake), sleep.awake, Palette.sleepAwake, SleepStage.awake),
@@ -372,9 +375,9 @@ class _StagesCard extends StatelessWidget {
     final dim = selected != null && !isSel;
     return Material(
       color: isSel ? color.withValues(alpha: 0.12) : Colors.transparent,
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.circular(Metrics.cornerCard),
       child: InkWell(
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(Metrics.cornerCard),
         onTap: () => onSelect(stage),
         child: Opacity(
           opacity: dim ? 0.45 : 1,
@@ -461,32 +464,3 @@ class _StageStripPainter extends CustomPainter {
   bool shouldRepaint(_StageStripPainter old) =>
       old.segments != segments || old.stage != stage;
 }
-
-/// A subtle rounded card used by the timeline and stages sections.
-Widget _card({required String title, required String action, required Widget child}) =>
-    Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Palette.surfaceRaised,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(title,
-                    style: NoopType.overline.copyWith(
-                        color: Palette.textSecondary,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 1.2)),
-              ),
-              Text(action, style: NoopType.footnote.copyWith(color: Palette.restColor)),
-            ],
-          ),
-          const SizedBox(height: 14),
-          child,
-        ],
-      ),
-    );

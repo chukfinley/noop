@@ -5,6 +5,7 @@ import 'package:noop/core/state/format.dart';
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/shared/widgets/behavior.dart';
 import 'package:noop/shared/widgets/cards.dart';
+import 'package:noop/shared/widgets/common.dart';
 import 'package:noop/shared/widgets/controls.dart';
 import 'package:noop/shared/widgets/metric_gauge.dart';
 import 'package:noop/shared/widgets/scaffold.dart';
@@ -95,7 +96,7 @@ class DeviceSettingsScreen extends ConsumerWidget {
                 detail: name,
                 onTap: () => _rename(context, ref, name),
               ),
-              _divider(),
+              const Hairline(indent: 62),
               _row(
                 icon: Icons.cloud_sync_rounded,
                 color: Palette.metricCyan,
@@ -106,7 +107,7 @@ class DeviceSettingsScreen extends ConsumerWidget {
                   noopToast(context, 'Strap synced', kind: ToastKind.success);
                 },
               ),
-              _divider(),
+              const Hairline(indent: 62),
               _row(
                 icon: Icons.system_update_alt_rounded,
                 color: Palette.metricPurple,
@@ -124,8 +125,9 @@ class DeviceSettingsScreen extends ConsumerWidget {
         NoopCard(
           child: Row(
             children: [
-              _chip(Icons.favorite_rounded,
-                  broadcast ? Palette.metricRose : Palette.textTertiary),
+              IconChip(Icons.favorite_rounded,
+                  color:
+                      broadcast ? Palette.metricRose : Palette.textTertiary),
               const SizedBox(width: Metrics.space12),
               Expanded(
                 child: Column(
@@ -154,25 +156,6 @@ class DeviceSettingsScreen extends ConsumerWidget {
     );
   }
 
-  Widget _divider() => Padding(
-        padding: const EdgeInsets.only(left: 62),
-        child: Divider(
-            height: 1,
-            thickness: 1,
-            color: Palette.hairline.withValues(alpha: 0.6)),
-      );
-
-  Widget _chip(IconData icon, Color color) => Container(
-        width: 38,
-        height: 38,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(11),
-        ),
-        child: Icon(icon, size: 19, color: color),
-      );
-
   Widget _row({
     required IconData icon,
     required Color color,
@@ -189,7 +172,7 @@ class DeviceSettingsScreen extends ConsumerWidget {
                 horizontal: Metrics.space16, vertical: Metrics.space12),
             child: Row(
               children: [
-                _chip(icon, color),
+                IconChip(icon, color: color),
                 const SizedBox(width: Metrics.space12),
                 Expanded(
                   child: Column(
@@ -235,7 +218,8 @@ class DeviceSettingsScreen extends ConsumerWidget {
           TextButton(
               onPressed: () => Navigator.pop(ctx),
               child: Text('Cancel',
-                  style: TextStyle(color: Palette.textSecondary))),
+                  style:
+                      NoopType.body.copyWith(color: Palette.textSecondary))),
           FilledButton(
             onPressed: () {
               final v = ctrl.text.trim();

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:noop/shared/widgets/coming_soon.dart';
+import 'package:noop/shared/widgets/scaffold.dart';
 import 'package:noop/core/theme/metrics.dart';
 
 // WHOOP-style purple hero that fades into the app's dark base — the Journal's
@@ -48,26 +49,37 @@ class JournalScreen extends StatelessWidget {
     );
   }
 
-  Widget _header(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-        child: Row(
-          children: [
-            IconButton(
-              icon: const Icon(Icons.close_rounded, color: Colors.white),
-              onPressed: () => Navigator.of(context).maybePop(),
+  // Minimal centred header: the canonical NoopBackButton (auto-shown when the
+  // route can pop — Journal is always pushed) plus a mirrored trailing slot so
+  // the white title stays optically centred. We keep the white title here
+  // rather than use CenteredHeader because its Palette.textPrimary title/icon
+  // colours flip with the theme and would clash on this fixed purple hero.
+  Widget _header(BuildContext context) {
+    final canPop = ModalRoute.of(context)?.canPop ?? false;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 40,
+            height: 40,
+            child: canPop
+                ? NoopBackButton(onTap: () => Navigator.of(context).maybePop())
+                : null,
+          ),
+          Expanded(
+            child: Center(
+              child: Text('LOGBOOK',
+                  style: NoopType.overline.copyWith(
+                      color: Colors.white,
+                      letterSpacing: 2,
+                      fontWeight: FontWeight.w700)),
             ),
-            Expanded(
-              child: Center(
-                child: Text('LOGBOOK',
-                    style: NoopType.overline.copyWith(
-                        color: Colors.white,
-                        letterSpacing: 2,
-                        fontWeight: FontWeight.w700)),
-              ),
-            ),
-            // Balances the leading close button so the title stays centred.
-            const SizedBox(width: 48),
-          ],
-        ),
-      );
+          ),
+          // Mirrors the 40×40 back-button slot so the title stays centred.
+          const SizedBox(width: 40, height: 40),
+        ],
+      ),
+    );
+  }
 }

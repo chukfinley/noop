@@ -9,6 +9,7 @@ import 'package:noop/core/state/providers.dart';
 import 'package:noop/shared/widgets/behavior.dart';
 import 'package:noop/shared/widgets/cards.dart';
 import 'package:noop/shared/widgets/charts.dart';
+import 'package:noop/shared/widgets/common.dart';
 import 'package:noop/shared/widgets/coming_soon.dart';
 import 'package:noop/shared/widgets/health_charts.dart';
 import 'package:noop/shared/widgets/liquid.dart';
@@ -212,16 +213,7 @@ class _TimelineRow extends StatelessWidget {
           child: Stack(
             clipBehavior: Clip.none,
             children: [
-              Container(
-                width: 40,
-                height: 40,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.16),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(icon, size: 20, color: color),
-              ),
+              IconChip(icon, color: color, size: 40),
               if (badge != null)
                 Positioned(
                   right: -4,
@@ -231,7 +223,7 @@ class _TimelineRow extends StatelessWidget {
                         const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                     decoration: BoxDecoration(
                       color: Palette.surfaceRaised,
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(Metrics.cornerBadge),
                       border: Border.all(
                           color: color.withValues(alpha: 0.5), width: 1),
                     ),
@@ -266,7 +258,7 @@ class _TimelineRow extends StatelessWidget {
     return Material(
       color: Colors.transparent,
       child: InkWell(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(Metrics.cornerChip),
         onTap: onTap,
         child: row,
       ),
@@ -286,7 +278,7 @@ class _HeroGauge extends ConsumerWidget {
     final style = ref.watch(gaugeStyleProvider);
     return NoopCard(
       squircle: true,
-      radius: 40,
+      radius: Metrics.cornerHero,
       bordered: false,
       padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
       child: Column(
@@ -340,7 +332,7 @@ class _TimelineCard extends StatelessWidget {
         Color.lerp(Palette.surfaceBase, Palette.surfaceRaised, 0.5)!;
     return NoopCard(
       squircle: true,
-      radius: 36,
+      radius: Metrics.cornerHero,
       bordered: false,
       fillColor: recessed,
       child: Column(

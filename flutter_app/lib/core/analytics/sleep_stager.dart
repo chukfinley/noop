@@ -91,8 +91,12 @@ class SleepStager {
     if (hi - lo + 1 < _minWindowEpochs) return null;
 
     // Trim leading/trailing non-sleepy epochs so the window is tightly bounded.
-    while (lo < hi && !sleepy[lo]) lo++;
-    while (hi > lo && !sleepy[hi]) hi--;
+    while (lo < hi && !sleepy[lo]) {
+      lo++;
+    }
+    while (hi > lo && !sleepy[hi]) {
+      hi--;
+    }
     if (hi - lo + 1 < _minWindowEpochs) return null;
 
     final startTs = epochTs[lo];
@@ -287,7 +291,9 @@ class SleepStager {
   static double _std(List<double> xs) {
     if (xs.length < 2) return 0;
     var mean = 0.0;
-    for (final x in xs) mean += x;
+    for (final x in xs) {
+      mean += x;
+    }
     mean /= xs.length;
     var v = 0.0;
     for (final x in xs) {

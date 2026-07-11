@@ -367,7 +367,7 @@ class _GlassPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final radius = BorderRadius.circular(40);
+    final radius = BorderRadius.circular(Metrics.cornerHero);
     // Light mode: a clean white card with a soft lift and a subtle hairline —
     // no dark frost. Dark mode: the translucent frosted pane over the scenic sky.
     if (Palette.isLight) {
@@ -453,7 +453,7 @@ class _HeroCell extends ConsumerWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(Metrics.cornerChip),
         hoverColor: Colors.transparent,
         splashColor: Colors.transparent,
         highlightColor: Colors.transparent,
@@ -506,7 +506,7 @@ class _StressEnergy extends ConsumerWidget {
         NoopCard(
           bordered: false,
           squircle: true,
-          radius: 36,
+          radius: Metrics.cornerHero,
           onTap: () => Navigator.of(context)
               .push(noopRoute(const MetricDetailScreen(kind: MetricKind.stress))),
           child: Column(
@@ -573,7 +573,7 @@ class _StressEnergy extends ConsumerWidget {
         NoopCard(
           bordered: false,
           squircle: true,
-          radius: 36,
+          radius: Metrics.cornerHero,
           child: Row(
             children: [
               Icon(Icons.bolt_rounded, color: Palette.chargeColor, size: 22),
@@ -711,7 +711,7 @@ class _MetricChartCard extends StatelessWidget {
         Color.lerp(Palette.surfaceBase, Palette.surfaceRaised, 0.5)!;
     return NoopCard(
       squircle: true,
-      radius: 36,
+      radius: Metrics.cornerHero,
       bordered: false,
       fillColor: recessed,
       onTap: () => Navigator.of(context)
