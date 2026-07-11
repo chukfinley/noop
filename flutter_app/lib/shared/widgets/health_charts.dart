@@ -437,7 +437,7 @@ class _DetailPainter extends CustomPainter {
       final bot = _y(targetLow!, h);
       canvas.drawRRect(
         RRect.fromRectAndRadius(
-            Rect.fromLTRB(0, top, size.width, bot), const Radius.circular(10)),
+            Rect.fromLTRB(0, top, size.width, bot), const Radius.circular(Metrics.cornerChip)),
         Paint()..color = _ghBand.withValues(alpha: 0.7),
       );
     }

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:noop/core/theme/metrics.dart';
 import 'package:noop/core/theme/palette.dart';
 import 'package:noop/core/theme/tokens.dart';
 
@@ -87,8 +88,8 @@ ThemeData buildNoopTheme(PaletteTokens brand, Brightness brightness) {
   Palette.lightMode = brightness == Brightness.light;
 
   final text = _expressiveTextTheme(scheme);
-  final shapeM = RoundedRectangleBorder(borderRadius: BorderRadius.circular(20));
-  final shapeL = RoundedRectangleBorder(borderRadius: BorderRadius.circular(28));
+  final shapeM = RoundedRectangleBorder(borderRadius: BorderRadius.circular(Metrics.cornerLarge));
+  final shapeL = RoundedRectangleBorder(borderRadius: BorderRadius.circular(Metrics.cornerSheet));
 
   return ThemeData(
     useMaterial3: true,
@@ -123,7 +124,7 @@ ThemeData buildNoopTheme(PaletteTokens brand, Brightness brightness) {
       backgroundColor: scheme.primaryContainer,
       foregroundColor: scheme.onPrimaryContainer,
       elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Metrics.cornerLarge)),
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
@@ -144,7 +145,7 @@ ThemeData buildNoopTheme(PaletteTokens brand, Brightness brightness) {
       backgroundColor: scheme.surfaceContainerHigh,
       selectedColor: scheme.secondaryContainer,
       side: BorderSide.none,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Metrics.cornerChip)),
       labelStyle: text.labelLarge,
     ),
     switchTheme: SwitchThemeData(
@@ -163,7 +164,7 @@ ThemeData buildNoopTheme(PaletteTokens brand, Brightness brightness) {
       behavior: SnackBarBehavior.floating,
       backgroundColor: scheme.inverseSurface,
       contentTextStyle: text.bodyMedium?.copyWith(color: scheme.onInverseSurface),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Metrics.cornerChip)),
     ),
   );
 }

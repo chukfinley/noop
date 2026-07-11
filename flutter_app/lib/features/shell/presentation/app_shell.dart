@@ -115,7 +115,7 @@ class _LogWeightSheet extends StatelessWidget {
   /// A translucent inner tile — the glass-on-glass surface used for each action.
   BoxDecoration _tileBox(Color onGlass) => BoxDecoration(
         color: onGlass.withValues(alpha: 0.07),
-        borderRadius: BorderRadius.circular(22),
+        borderRadius: BorderRadius.circular(Metrics.cornerLarge),
         border: Border.all(color: onGlass.withValues(alpha: 0.10), width: 1),
       );
 
@@ -153,13 +153,13 @@ class _LogWeightSheet extends StatelessWidget {
         bottom: MediaQuery.of(context).viewInsets.bottom + 16,
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(34),
+        borderRadius: BorderRadius.circular(Metrics.cornerSheet),
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 48, sigmaY: 48),
           child: Container(
             decoration: BoxDecoration(
               color: scheme.surfaceContainerHigh.withValues(alpha: 0.26),
-              borderRadius: BorderRadius.circular(34),
+              borderRadius: BorderRadius.circular(Metrics.cornerSheet),
               border: Border.all(
                   color: onGlass.withValues(alpha: 0.10), width: 1),
             ),
