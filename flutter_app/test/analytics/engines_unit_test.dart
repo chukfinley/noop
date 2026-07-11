@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:noop/analytics/baselines.dart';
-import 'package:noop/analytics/hrv_analyzer.dart';
-import 'package:noop/analytics/recovery_scorer.dart';
-import 'package:noop/analytics/strain_scorer.dart';
+import 'package:noop/core/analytics/baselines.dart';
+import 'package:noop/core/analytics/hrv_analyzer.dart';
+import 'package:noop/core/analytics/recovery_scorer.dart';
+import 'package:noop/core/analytics/strain_scorer.dart';
 
 /// Regression guards for the ported NOOP analytics. These pin the Kotlin
 /// algorithms to fixed, hand-computed numbers so any accidental change to a

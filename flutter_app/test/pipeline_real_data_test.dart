@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:noop/data/real_repository.dart';
+import 'package:noop/core/data/real_repository.dart';
 
 /// End-to-end guard: loads the REAL bundled Whoop capture, runs the full ported
 /// analytics pipeline, prints a human-readable analysis report, and asserts the

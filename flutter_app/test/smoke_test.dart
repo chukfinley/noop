@@ -4,13 +4,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import 'package:noop/main.dart';
-import 'package:noop/state/providers.dart';
-import 'package:noop/state/format.dart';
-import 'package:noop/data/repository.dart';
-import 'package:noop/data/real_repository.dart';
-import 'package:noop/ui/screens/sleep_screen.dart';
-import 'package:noop/analytics/engines.dart';
-import 'package:noop/analytics/baselines.dart';
+import 'package:noop/core/state/providers.dart';
+import 'package:noop/core/state/format.dart';
+import 'package:noop/core/data/repository.dart';
+import 'package:noop/core/data/real_repository.dart';
+import 'package:noop/features/sleep/presentation/sleep_screen.dart';
+import 'package:noop/core/analytics/engines.dart';
+import 'package:noop/core/analytics/baselines.dart';
 
 /// Boot straight into the shell (skip the onboarding gate).
 Widget _bootedApp() => ProviderScope(

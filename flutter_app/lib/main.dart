@@ -1,15 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'data/real_repository.dart';
-import 'data/repository.dart';
-import 'state/prefs.dart';
-import 'state/providers.dart';
-import 'ui/app_shell.dart';
-import 'ui/screens/onboarding_screen.dart';
-import 'ui/theme/metrics.dart';
-import 'ui/theme/noop_theme.dart';
-import 'ui/theme/palette.dart';
+import 'package:noop/core/data/real_repository.dart';
+import 'package:noop/core/data/repository.dart';
+import 'package:noop/core/state/prefs.dart';
+import 'package:noop/core/state/providers.dart';
+import 'package:noop/features/shell/presentation/app_shell.dart';
+import 'package:noop/features/onboarding/presentation/onboarding_screen.dart';
+import 'package:noop/core/theme/metrics.dart';
+import 'package:noop/core/theme/noop_theme.dart';
+import 'package:noop/core/theme/palette.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
