@@ -262,4 +262,96 @@ void main() {
       expect(await db.select(db.whoopPpgRawSamples).get(), hasLength(1));
     });
   });
+
+  // ── Fix 4: every decoded-but-uncolumned v18 field is captured long-format ──
+  //
+  // The WHOOP5 v18 decoder produces ~14 per-second fields (record_index, cardiac_*,
+  // rr_packed, step_cadence, motion_wear_quality, the aux thermal registers, the
+  // status words, wake_quality, aux_byte_82, unknown_f32_113) that had no typed
+  // column and were dropped one line before the store. They now land in the new
+  // append-only `rawFieldSample` long-format table (deviceId, ts, key) → int|real.
+
+  group('Fix 4 — dropped v18 fields captured into rawFieldSample', () {
+    // The SAME real worn WHOOP 5 v18 frame used by Fix 2.
+    const wornV18 =
+        'aa01740001003fb12f1280733d8401b69f266a66460066025a0265020000000000007b0a8d656463ff0012163cf6a439bf2924fd3ed763fe3e3200aa000000000000000000f7000901f10b0007010c020c00000000000000000000000000000000000000000000000100656f1e1e0000009d61a7c00000003e862817';
+    const unix = 1780916150;
+
+    late AppDatabase db;
+    late DriftStreamRepository repo;
+    setUp(() {
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+      repo = DriftStreamRepository(db);
+    });
+    tearDown(() async => db.close());
+
+    test('decode → extract → persist round-trips all 14 raw fields', () async {
+      final st =
+          extractHistoricalStreams([bytes(wornV18)], unix, unix, DeviceFamily.whoop5);
+
+      // Every one is present in the carrier, keyed to the record's own unix second.
+      final byKey = {for (final r in st.rawFields) r.key: r};
+      expect(byKey.keys.toSet(), {
+        'record_index',
+        'cardiac_flags',
+        'rr_packed',
+        'cardiac_status',
+        'step_cadence',
+        'motion_wear_quality',
+        'temp_aux_1_raw',
+        'temp_aux_2_raw',
+        'status_word',
+        'status_word_1',
+        'status_word_2',
+        'wake_quality',
+        'aux_byte_82',
+        'unknown_f32_113',
+      });
+      // Integer registers land in intValue; the one float in realValue.
+      expect(byKey['step_cadence']!.intValue, 170);
+      expect(byKey['cardiac_status']!.intValue, 255);
+      expect(byKey['status_word']!.intValue, 1792);
+      expect(byKey['record_index']!.intValue, 25443699);
+      expect(byKey['step_cadence']!.realValue, isNull);
+      expect(byKey['unknown_f32_113']!.intValue, isNull);
+      expect(byKey['unknown_f32_113']!.realValue, closeTo(-5.23, 0.01));
+      for (final r in st.rawFields) {
+        expect(r.ts, unix);
+      }
+
+      await repo.insert(st, 'my-whoop');
+
+      final rows = await db.select(db.whoopRawFieldSamples).get();
+      expect(rows, hasLength(14));
+      final dbByKey = {for (final r in rows) r.key: r};
+      expect(dbByKey['step_cadence']!.intValue, 170);
+      expect(dbByKey['step_cadence']!.realValue, isNull);
+      expect(dbByKey['unknown_f32_113']!.realValue, closeTo(-5.23, 0.01));
+      expect(dbByKey['unknown_f32_113']!.intValue, isNull);
+      expect(rows.every((r) => r.deviceId == 'my-whoop' && r.ts == unix), isTrue);
+    });
+
+    test('re-inserting the same second is a no-op (append-only immutability)', () async {
+      final st =
+          extractHistoricalStreams([bytes(wornV18)], unix, unix, DeviceFamily.whoop5);
+      await repo.insert(st, 'my-whoop');
+      await repo.insert(st, 'my-whoop');
+      // Idempotent on (deviceId, ts, key): the second insert changes nothing.
+      expect(await db.select(db.whoopRawFieldSamples).get(), hasLength(14));
+    });
+
+    test('WHOOP4 v24 records produce no rawFieldSample rows (v18-only, no misfilling)',
+        () async {
+      // The real WHOOP4 v24 fixture from Fix 1 — none of the v18 keys exist here.
+      const realV24Hex =
+          'aa6400a12f18054c1c0a023ed0266a5037805418016d022b0234020000000000006b07ff00'
+          '85593c1f65cebed7b3e63eb85a5f3f000080401f65cebed7b3e63eb85a5f3f500264025d03'
+          '640229014009010c020c00000000000f0001c4020000000000008fdeb278';
+      final st = extractHistoricalStreams(
+          [bytes(realV24Hex)], 1700001000, 1700001000, DeviceFamily.whoop4);
+      expect(st.rawFields, isEmpty);
+      await repo.insert(st, 'my-whoop');
+      expect(await db.select(db.whoopRawFieldSamples).get(), isEmpty);
+    });
+  });
 }

@@ -16292,6 +16292,370 @@ class WhoopGravitySamplesCompanion extends UpdateCompanion<WhoopGravitySample> {
   }
 }
 
+class $WhoopRawFieldSamplesTable extends WhoopRawFieldSamples
+    with TableInfo<$WhoopRawFieldSamplesTable, WhoopRawFieldSample> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $WhoopRawFieldSamplesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _deviceIdMeta = const VerificationMeta(
+    'deviceId',
+  );
+  @override
+  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
+    'device_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _tsMeta = const VerificationMeta('ts');
+  @override
+  late final GeneratedColumn<int> ts = GeneratedColumn<int>(
+    'ts',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _keyMeta = const VerificationMeta('key');
+  @override
+  late final GeneratedColumn<String> key = GeneratedColumn<String>(
+    'key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _intValueMeta = const VerificationMeta(
+    'intValue',
+  );
+  @override
+  late final GeneratedColumn<int> intValue = GeneratedColumn<int>(
+    'int_value',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _realValueMeta = const VerificationMeta(
+    'realValue',
+  );
+  @override
+  late final GeneratedColumn<double> realValue = GeneratedColumn<double>(
+    'real_value',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    deviceId,
+    ts,
+    key,
+    intValue,
+    realValue,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'rawFieldSample';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<WhoopRawFieldSample> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('device_id')) {
+      context.handle(
+        _deviceIdMeta,
+        deviceId.isAcceptableOrUnknown(data['device_id']!, _deviceIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_deviceIdMeta);
+    }
+    if (data.containsKey('ts')) {
+      context.handle(_tsMeta, ts.isAcceptableOrUnknown(data['ts']!, _tsMeta));
+    } else if (isInserting) {
+      context.missing(_tsMeta);
+    }
+    if (data.containsKey('key')) {
+      context.handle(
+        _keyMeta,
+        key.isAcceptableOrUnknown(data['key']!, _keyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_keyMeta);
+    }
+    if (data.containsKey('int_value')) {
+      context.handle(
+        _intValueMeta,
+        intValue.isAcceptableOrUnknown(data['int_value']!, _intValueMeta),
+      );
+    }
+    if (data.containsKey('real_value')) {
+      context.handle(
+        _realValueMeta,
+        realValue.isAcceptableOrUnknown(data['real_value']!, _realValueMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {deviceId, ts, key};
+  @override
+  WhoopRawFieldSample map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return WhoopRawFieldSample(
+      deviceId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}device_id'],
+      )!,
+      ts: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}ts'],
+      )!,
+      key: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}key'],
+      )!,
+      intValue: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}int_value'],
+      ),
+      realValue: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}real_value'],
+      ),
+    );
+  }
+
+  @override
+  $WhoopRawFieldSamplesTable createAlias(String alias) {
+    return $WhoopRawFieldSamplesTable(attachedDatabase, alias);
+  }
+}
+
+class WhoopRawFieldSample extends DataClass
+    implements Insertable<WhoopRawFieldSample> {
+  final String deviceId;
+  final int ts;
+  final String key;
+  final int? intValue;
+  final double? realValue;
+  const WhoopRawFieldSample({
+    required this.deviceId,
+    required this.ts,
+    required this.key,
+    this.intValue,
+    this.realValue,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['device_id'] = Variable<String>(deviceId);
+    map['ts'] = Variable<int>(ts);
+    map['key'] = Variable<String>(key);
+    if (!nullToAbsent || intValue != null) {
+      map['int_value'] = Variable<int>(intValue);
+    }
+    if (!nullToAbsent || realValue != null) {
+      map['real_value'] = Variable<double>(realValue);
+    }
+    return map;
+  }
+
+  WhoopRawFieldSamplesCompanion toCompanion(bool nullToAbsent) {
+    return WhoopRawFieldSamplesCompanion(
+      deviceId: Value(deviceId),
+      ts: Value(ts),
+      key: Value(key),
+      intValue: intValue == null && nullToAbsent
+          ? const Value.absent()
+          : Value(intValue),
+      realValue: realValue == null && nullToAbsent
+          ? const Value.absent()
+          : Value(realValue),
+    );
+  }
+
+  factory WhoopRawFieldSample.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return WhoopRawFieldSample(
+      deviceId: serializer.fromJson<String>(json['deviceId']),
+      ts: serializer.fromJson<int>(json['ts']),
+      key: serializer.fromJson<String>(json['key']),
+      intValue: serializer.fromJson<int?>(json['intValue']),
+      realValue: serializer.fromJson<double?>(json['realValue']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'deviceId': serializer.toJson<String>(deviceId),
+      'ts': serializer.toJson<int>(ts),
+      'key': serializer.toJson<String>(key),
+      'intValue': serializer.toJson<int?>(intValue),
+      'realValue': serializer.toJson<double?>(realValue),
+    };
+  }
+
+  WhoopRawFieldSample copyWith({
+    String? deviceId,
+    int? ts,
+    String? key,
+    Value<int?> intValue = const Value.absent(),
+    Value<double?> realValue = const Value.absent(),
+  }) => WhoopRawFieldSample(
+    deviceId: deviceId ?? this.deviceId,
+    ts: ts ?? this.ts,
+    key: key ?? this.key,
+    intValue: intValue.present ? intValue.value : this.intValue,
+    realValue: realValue.present ? realValue.value : this.realValue,
+  );
+  WhoopRawFieldSample copyWithCompanion(WhoopRawFieldSamplesCompanion data) {
+    return WhoopRawFieldSample(
+      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
+      ts: data.ts.present ? data.ts.value : this.ts,
+      key: data.key.present ? data.key.value : this.key,
+      intValue: data.intValue.present ? data.intValue.value : this.intValue,
+      realValue: data.realValue.present ? data.realValue.value : this.realValue,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('WhoopRawFieldSample(')
+          ..write('deviceId: $deviceId, ')
+          ..write('ts: $ts, ')
+          ..write('key: $key, ')
+          ..write('intValue: $intValue, ')
+          ..write('realValue: $realValue')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(deviceId, ts, key, intValue, realValue);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is WhoopRawFieldSample &&
+          other.deviceId == this.deviceId &&
+          other.ts == this.ts &&
+          other.key == this.key &&
+          other.intValue == this.intValue &&
+          other.realValue == this.realValue);
+}
+
+class WhoopRawFieldSamplesCompanion
+    extends UpdateCompanion<WhoopRawFieldSample> {
+  final Value<String> deviceId;
+  final Value<int> ts;
+  final Value<String> key;
+  final Value<int?> intValue;
+  final Value<double?> realValue;
+  final Value<int> rowid;
+  const WhoopRawFieldSamplesCompanion({
+    this.deviceId = const Value.absent(),
+    this.ts = const Value.absent(),
+    this.key = const Value.absent(),
+    this.intValue = const Value.absent(),
+    this.realValue = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  WhoopRawFieldSamplesCompanion.insert({
+    required String deviceId,
+    required int ts,
+    required String key,
+    this.intValue = const Value.absent(),
+    this.realValue = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : deviceId = Value(deviceId),
+       ts = Value(ts),
+       key = Value(key);
+  static Insertable<WhoopRawFieldSample> custom({
+    Expression<String>? deviceId,
+    Expression<int>? ts,
+    Expression<String>? key,
+    Expression<int>? intValue,
+    Expression<double>? realValue,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (deviceId != null) 'device_id': deviceId,
+      if (ts != null) 'ts': ts,
+      if (key != null) 'key': key,
+      if (intValue != null) 'int_value': intValue,
+      if (realValue != null) 'real_value': realValue,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  WhoopRawFieldSamplesCompanion copyWith({
+    Value<String>? deviceId,
+    Value<int>? ts,
+    Value<String>? key,
+    Value<int?>? intValue,
+    Value<double?>? realValue,
+    Value<int>? rowid,
+  }) {
+    return WhoopRawFieldSamplesCompanion(
+      deviceId: deviceId ?? this.deviceId,
+      ts: ts ?? this.ts,
+      key: key ?? this.key,
+      intValue: intValue ?? this.intValue,
+      realValue: realValue ?? this.realValue,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (deviceId.present) {
+      map['device_id'] = Variable<String>(deviceId.value);
+    }
+    if (ts.present) {
+      map['ts'] = Variable<int>(ts.value);
+    }
+    if (key.present) {
+      map['key'] = Variable<String>(key.value);
+    }
+    if (intValue.present) {
+      map['int_value'] = Variable<int>(intValue.value);
+    }
+    if (realValue.present) {
+      map['real_value'] = Variable<double>(realValue.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('WhoopRawFieldSamplesCompanion(')
+          ..write('deviceId: $deviceId, ')
+          ..write('ts: $ts, ')
+          ..write('key: $key, ')
+          ..write('intValue: $intValue, ')
+          ..write('realValue: $realValue, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $SyncCursorsTable extends SyncCursors
     with TableInfo<$SyncCursorsTable, SyncCursor> {
   @override
@@ -16558,6 +16922,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   );
   late final $WhoopGravitySamplesTable whoopGravitySamples =
       $WhoopGravitySamplesTable(this);
+  late final $WhoopRawFieldSamplesTable whoopRawFieldSamples =
+      $WhoopRawFieldSamplesTable(this);
   late final $SyncCursorsTable syncCursors = $SyncCursorsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
@@ -16599,6 +16965,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     whoopSleepStateSamples,
     whoopRespSamples,
     whoopGravitySamples,
+    whoopRawFieldSamples,
     syncCursors,
   ];
   @override
@@ -25391,6 +25758,222 @@ typedef $$WhoopGravitySamplesTableProcessedTableManager =
       WhoopGravitySample,
       PrefetchHooks Function()
     >;
+typedef $$WhoopRawFieldSamplesTableCreateCompanionBuilder =
+    WhoopRawFieldSamplesCompanion Function({
+      required String deviceId,
+      required int ts,
+      required String key,
+      Value<int?> intValue,
+      Value<double?> realValue,
+      Value<int> rowid,
+    });
+typedef $$WhoopRawFieldSamplesTableUpdateCompanionBuilder =
+    WhoopRawFieldSamplesCompanion Function({
+      Value<String> deviceId,
+      Value<int> ts,
+      Value<String> key,
+      Value<int?> intValue,
+      Value<double?> realValue,
+      Value<int> rowid,
+    });
+
+class $$WhoopRawFieldSamplesTableFilterComposer
+    extends Composer<_$AppDatabase, $WhoopRawFieldSamplesTable> {
+  $$WhoopRawFieldSamplesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get ts => $composableBuilder(
+    column: $table.ts,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get intValue => $composableBuilder(
+    column: $table.intValue,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get realValue => $composableBuilder(
+    column: $table.realValue,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$WhoopRawFieldSamplesTableOrderingComposer
+    extends Composer<_$AppDatabase, $WhoopRawFieldSamplesTable> {
+  $$WhoopRawFieldSamplesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get ts => $composableBuilder(
+    column: $table.ts,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get intValue => $composableBuilder(
+    column: $table.intValue,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get realValue => $composableBuilder(
+    column: $table.realValue,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$WhoopRawFieldSamplesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $WhoopRawFieldSamplesTable> {
+  $$WhoopRawFieldSamplesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get deviceId =>
+      $composableBuilder(column: $table.deviceId, builder: (column) => column);
+
+  GeneratedColumn<int> get ts =>
+      $composableBuilder(column: $table.ts, builder: (column) => column);
+
+  GeneratedColumn<String> get key =>
+      $composableBuilder(column: $table.key, builder: (column) => column);
+
+  GeneratedColumn<int> get intValue =>
+      $composableBuilder(column: $table.intValue, builder: (column) => column);
+
+  GeneratedColumn<double> get realValue =>
+      $composableBuilder(column: $table.realValue, builder: (column) => column);
+}
+
+class $$WhoopRawFieldSamplesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $WhoopRawFieldSamplesTable,
+          WhoopRawFieldSample,
+          $$WhoopRawFieldSamplesTableFilterComposer,
+          $$WhoopRawFieldSamplesTableOrderingComposer,
+          $$WhoopRawFieldSamplesTableAnnotationComposer,
+          $$WhoopRawFieldSamplesTableCreateCompanionBuilder,
+          $$WhoopRawFieldSamplesTableUpdateCompanionBuilder,
+          (
+            WhoopRawFieldSample,
+            BaseReferences<
+              _$AppDatabase,
+              $WhoopRawFieldSamplesTable,
+              WhoopRawFieldSample
+            >,
+          ),
+          WhoopRawFieldSample,
+          PrefetchHooks Function()
+        > {
+  $$WhoopRawFieldSamplesTableTableManager(
+    _$AppDatabase db,
+    $WhoopRawFieldSamplesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$WhoopRawFieldSamplesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$WhoopRawFieldSamplesTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$WhoopRawFieldSamplesTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> deviceId = const Value.absent(),
+                Value<int> ts = const Value.absent(),
+                Value<String> key = const Value.absent(),
+                Value<int?> intValue = const Value.absent(),
+                Value<double?> realValue = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => WhoopRawFieldSamplesCompanion(
+                deviceId: deviceId,
+                ts: ts,
+                key: key,
+                intValue: intValue,
+                realValue: realValue,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String deviceId,
+                required int ts,
+                required String key,
+                Value<int?> intValue = const Value.absent(),
+                Value<double?> realValue = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => WhoopRawFieldSamplesCompanion.insert(
+                deviceId: deviceId,
+                ts: ts,
+                key: key,
+                intValue: intValue,
+                realValue: realValue,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$WhoopRawFieldSamplesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $WhoopRawFieldSamplesTable,
+      WhoopRawFieldSample,
+      $$WhoopRawFieldSamplesTableFilterComposer,
+      $$WhoopRawFieldSamplesTableOrderingComposer,
+      $$WhoopRawFieldSamplesTableAnnotationComposer,
+      $$WhoopRawFieldSamplesTableCreateCompanionBuilder,
+      $$WhoopRawFieldSamplesTableUpdateCompanionBuilder,
+      (
+        WhoopRawFieldSample,
+        BaseReferences<
+          _$AppDatabase,
+          $WhoopRawFieldSamplesTable,
+          WhoopRawFieldSample
+        >,
+      ),
+      WhoopRawFieldSample,
+      PrefetchHooks Function()
+    >;
 typedef $$SyncCursorsTableCreateCompanionBuilder =
     SyncCursorsCompanion Function({
       required String name,
@@ -25608,6 +26191,8 @@ class $AppDatabaseManager {
       $$WhoopRespSamplesTableTableManager(_db, _db.whoopRespSamples);
   $$WhoopGravitySamplesTableTableManager get whoopGravitySamples =>
       $$WhoopGravitySamplesTableTableManager(_db, _db.whoopGravitySamples);
+  $$WhoopRawFieldSamplesTableTableManager get whoopRawFieldSamples =>
+      $$WhoopRawFieldSamplesTableTableManager(_db, _db.whoopRawFieldSamples);
   $$SyncCursorsTableTableManager get syncCursors =>
       $$SyncCursorsTableTableManager(_db, _db.syncCursors);
 }

@@ -98,6 +98,16 @@ The **bold** rows are the untapped *data* channels. The rest are handshake/contr
 
 ## 2. Untapped channels — ranked by raw-completeness value
 
+> **Capture status (v4):** every channel in this section is **WON'T-CAPTURE (yet)** and the reason is
+> the same for all of them, so it is stated once here. Each requires **sending a battery-costly opt-in
+> command** to make the strap emit the channel AND has an **on-wire byte layout that is NOT
+> byte-confirmed** (the §5 open questions). The only way to pin those offsets/endianness is an
+> **on-device BLE capture**, which the project's test-only workflow (`flutter test`, NEVER launch the
+> app, no hardware) cannot produce. Adding a decoder now would mean **inventing offsets** — which would
+> silently poison the typed store — so the honest action is to defer until a real capture exists. What
+> WAS captured in this pass is the decoded-but-dropped §3 fields, which need no new BLE and no unknown
+> layout. The honest negatives in §4 (server-side/derived) remain out of scope permanently.
+
 ### 2.1 Live raw DSP block — REALTIME_RAW_DATA (packet type 43 / 0x2B) via START_RAW_DATA (0x51)
 
 **Highest-value gap.** `START_RAW_DATA` (0x51) is already in our `CommandNumber` enum but the
@@ -186,27 +196,34 @@ Worth adding to make the multi-night backfill faster, but it changes no schema.
 
 ---
 
-## 3. Decoded-but-not-persisted fields (schema gaps, NOT new BLE)
+## 3. Decoded-but-not-persisted fields (schema gaps, NOT new BLE) — **CAPTURED (v4)**
 
 These are already produced by `decodeHistorical`/`_decodeWhoop5Historical` into the parsed map but
-`extractHistoricalStreams` never maps them onto a drift column, so they are dropped from the typed
-store (still recoverable from `RawSensorArchive` rawHex — so not *lost*, just not queryable):
+`extractHistoricalStreams` used to never map them onto a drift column. **As of schema v4 they are all
+CAPTURED** into a new append-only long-format table `rawFieldSample`
+`(deviceId, ts, key) -> intValue|realValue`, threaded on `StreamBatch.rawFields`
+(historical_streams.dart) → `DriftStreamRepository.insert` → `AppDatabase.insertWhoopRawFields`.
+Idempotent on the natural key `(deviceId, ts, key)`, so a re-offload is a no-op (immutability held).
 
-| Parsed key (historical_streams.dart) | Source | Currently |
-|---|---|---|
-| `step_cadence` (@59, WHOOP5 v18, L347) | per-step cadence byte | **dropped** — `StepRow` carries only `counter`+`activityClass` |
-| `cardiac_flags` (@33, L323) | cardiac status flags | dropped |
-| `rr_packed` (@38, L327) | packed RR | dropped |
-| `cardiac_status` (@40, L329) | cardiac status enum | dropped |
-| `motion_wear_quality` (@63, L349) | 0/1/2 wear quality | dropped |
-| `wake_quality` (band @81 bits2-3, L388) | sleep wake-quality | dropped |
-| `temp_aux_1_raw` / `temp_aux_2_raw` (@69/@71, L361/365) | aux thermal, °C=raw/10 | dropped |
-| `status_word` / `_1` / `_2` (@75/@77/@79) | 16-bit status words | dropped |
-| `aux_byte_82` (@82) | raw byte | dropped |
-| `unknown_f32_113` (@113) | unknown f32 | dropped |
+| Parsed key (historical_streams.dart) | Source | Column | Status |
+|---|---|---|---|
+| `step_cadence` (@59, WHOOP5 v18) | per-step cadence byte | `rawFieldSample` (int) | **CAPTURED** ✓ |
+| `cardiac_flags` (@33) | cardiac status flags | `rawFieldSample` (int) | **CAPTURED** ✓ |
+| `rr_packed` (@38) | packed RR | `rawFieldSample` (int) | **CAPTURED** ✓ |
+| `cardiac_status` (@40) | cardiac status enum | `rawFieldSample` (int) | **CAPTURED** ✓ |
+| `record_index` (@11) | per-record counter | `rawFieldSample` (int) | **CAPTURED** ✓ |
+| `motion_wear_quality` (@63) | 0/1/2 wear quality | `rawFieldSample` (int) | **CAPTURED** ✓ |
+| `wake_quality` (band @81 bits2-3) | sleep wake-quality | `rawFieldSample` (int) | **CAPTURED** ✓ |
+| `temp_aux_1_raw` / `temp_aux_2_raw` (@69/@71) | aux thermal, °C=raw/10 | `rawFieldSample` (int) | **CAPTURED** ✓ |
+| `status_word` / `_1` / `_2` (@75/@77/@79) | 16-bit status words | `rawFieldSample` (int) | **CAPTURED** ✓ |
+| `aux_byte_82` (@82) | raw byte | `rawFieldSample` (int) | **CAPTURED** ✓ |
+| `unknown_f32_113` (@113) | unknown f32 | `rawFieldSample` (real) | **CAPTURED** ✓ |
 
-The cheapest raw-completeness win in the whole document: **`step_cadence`** — it is decoded, it is
-physiologically meaningful (cadence), and it is thrown away one line before it would reach a row.
+The three physiologically-meaningful siblings (`hr_fixed_8_8`, `onwrist`, `dynamic_acceleration`)
+already have their own typed columns (v3, §0 baseline). Combined, **every field the historical
+decoder emits now lands in a durable column** — nothing decoded is dropped. Verified by
+`test/ble/sync/raw_data_loss_test.dart` Fix 4 (decode→persist round-trip + append-only idempotency)
+and `test/db/migration_test.dart` (v3→v4, plus v1→v4 / v2→v4 idempotency).
 
 ---
 

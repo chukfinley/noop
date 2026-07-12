@@ -208,6 +208,16 @@ class DriftStreamRepository implements BackfillRepository {
               sampleCount: it.samples.length,
               samples: it.packSamples()))
           .toList());
+      // Decoded-but-uncolumned v18 fields (long-format): persist-only (lossless), NOT
+      // counted. Idempotent on (deviceId, ts, key) so a re-offload is a no-op.
+      await _db.insertWhoopRawFields(streams.rawFields
+          .map((it) => WhoopRawFieldSamplesCompanion.insert(
+              deviceId: deviceId,
+              ts: it.ts,
+              key: it.key,
+              intValue: Value(it.intValue),
+              realValue: Value(it.realValue)))
+          .toList());
 
       // ppgHr folds into the hr count so the "persisted N" summary reflects HR recovered from the
       // optical waveform too, exactly like WhoopRepository.insert.

@@ -758,6 +758,40 @@ class PpgRawRow {
   }
 }
 
+/// A single decoded-but-previously-dropped raw strap field at wall-clock unix seconds [ts].
+///
+/// Long-format capture (mirrors the app's [MetricSamples] idea) for the WHOOP 5/MG v18
+/// per-second fields the historical decoder ALREADY produces but that had no typed column,
+/// so they were dropped one line before reaching the store (still recoverable from
+/// `RawSensorArchive.rawHex`, but not queryable). Each is a genuine strap-emitted byte:
+/// status/aux/cardiac words, the per-step cadence byte, the aux thermal registers, the
+/// wake-quality nibble, and the unknown f32 — kept so the "all raw data, durable, immutable"
+/// promise holds without a column-per-field explosion.
+///
+/// Exactly one of [intValue]/[realValue] is set: integer registers land in [intValue],
+/// the single float field (`unknown_f32_113`) in [realValue]. Identity is (ts, key), so a
+/// re-offload of the same strap-second is a no-op.
+class RawFieldRow {
+  const RawFieldRow(this.ts, this.key, {this.intValue, this.realValue});
+  final int ts;
+  final String key;
+  final int? intValue;
+  final double? realValue;
+
+  @override
+  bool operator ==(Object other) =>
+      other is RawFieldRow &&
+      other.ts == ts &&
+      other.key == key &&
+      other.intValue == intValue &&
+      other.realValue == realValue;
+  @override
+  int get hashCode => Object.hash(ts, key, intValue, realValue);
+  @override
+  String toString() =>
+      'RawFieldRow(ts: $ts, key: $key, intValue: $intValue, realValue: $realValue)';
+}
+
 /// HR derived from the v26 PPG waveform: [ts] window-centre sec, [bpm], [conf] in 0…1. (#156)
 class PpgHrRow {
   const PpgHrRow({required this.ts, required this.bpm, required this.conf});
@@ -790,6 +824,7 @@ class StreamBatch {
     List<SleepStateRow>? sleepState,
     List<PpgHrRow>? ppgHr,
     List<PpgRawRow>? ppgRaw,
+    List<RawFieldRow>? rawFields,
     this.droppedImplausibleTs = 0,
   })  : hr = hr ?? <HrRow>[],
         rr = rr ?? <RrRow>[],
@@ -802,7 +837,8 @@ class StreamBatch {
         steps = steps ?? <StepRow>[],
         sleepState = sleepState ?? <SleepStateRow>[],
         ppgHr = ppgHr ?? <PpgHrRow>[],
-        ppgRaw = ppgRaw ?? <PpgRawRow>[];
+        ppgRaw = ppgRaw ?? <PpgRawRow>[],
+        rawFields = rawFields ?? <RawFieldRow>[];
 
   final List<HrRow> hr;
   final List<RrRow> rr;
@@ -821,6 +857,14 @@ class StreamBatch {
   /// and on WHOOP4. Persisted losslessly so a future optical algorithm can re-run.
   final List<PpgRawRow> ppgRaw;
 
+  /// The WHOOP 5/MG v18 per-second fields the decoder produces but that have no typed
+  /// column of their own (`record_index`, `cardiac_flags`/`cardiac_status`, `rr_packed`,
+  /// `step_cadence`, `motion_wear_quality`, the aux thermal registers, the status words,
+  /// `wake_quality`, `aux_byte_82`, `unknown_f32_113`). Long-format, one row per
+  /// (ts, key). Empty on the live path and on WHOOP4 / non-v18 records. Persisted
+  /// losslessly so nothing decoded is ever dropped.
+  final List<RawFieldRow> rawFields;
+
   /// #547: how many historical records this batch DROPPED because their timestamp was implausible.
   /// A diagnostic counter only, deliberately excluded from [isEmpty].
   final int droppedImplausibleTs;
@@ -837,8 +881,37 @@ class StreamBatch {
       steps.isEmpty &&
       sleepState.isEmpty &&
       ppgHr.isEmpty &&
-      ppgRaw.isEmpty;
+      ppgRaw.isEmpty &&
+      rawFields.isEmpty;
 }
+
+/// The v18 per-second keys the decoder produces that have NO typed column, captured
+/// into [StreamBatch.rawFields] instead of being dropped. Split by wire type so each
+/// lands in the correct value column. Kept as an explicit allowlist (not "everything
+/// not otherwise columned") so a future decoder key is not silently swept in — it must
+/// be added here deliberately, and keys already owning a typed column
+/// (`heart_rate`, `hr_fixed_8_8`, `onwrist`, `rr_intervals`, `spo2_*`, `skin_temp_raw`,
+/// `resp_rate_raw`, `gravity_*`, `dynamic_acceleration`, `step_motion_counter`,
+/// `activity_class`, `sleep_state`, `unix`, `hist_version`) are deliberately absent.
+const List<String> _rawFieldIntKeys = <String>[
+  'record_index',
+  'cardiac_flags',
+  'rr_packed',
+  'cardiac_status',
+  'step_cadence',
+  'motion_wear_quality',
+  'temp_aux_1_raw',
+  'temp_aux_2_raw',
+  'status_word',
+  'status_word_1',
+  'status_word_2',
+  'wake_quality',
+  'aux_byte_82',
+];
+
+const List<String> _rawFieldRealKeys = <String>[
+  'unknown_f32_113',
+];
 
 // MARK: - Historical extraction (port of HistoricalStreams.swift extractHistoricalStreams)
 
@@ -932,6 +1005,8 @@ StreamBatch extractHistoricalStreams(
   final gravity = <GravityRow>[];
   final events = <EventEntry>[];
   final battery = <BatteryRow>[];
+  // Decoded-but-uncolumned v18 fields, captured long-format so nothing decoded is dropped.
+  final rawFields = <RawFieldRow>[];
   // v26 PPG samples accumulate across the chunk, then get turned into HR after the loop (#156).
   final ppgSamples = <PpgSample>[];
   // The RAW v26 waveform, one row per strap-second, preserved losslessly alongside the derived HR.
@@ -1019,6 +1094,15 @@ StreamBatch extractHistoricalStreams(
           dynamicAccel: p.doubleOrNull('dynamic_acceleration'),
         ));
       }
+      // Capture every decoded-but-uncolumned v18 field long-format (nothing decoded is dropped).
+      for (final k in _rawFieldIntKeys) {
+        final v = p.intOrNull(k);
+        if (v != null) rawFields.add(RawFieldRow(ts, k, intValue: v));
+      }
+      for (final k in _rawFieldRealKeys) {
+        final v = p.doubleOrNull(k);
+        if (v != null && v.isFinite) rawFields.add(RawFieldRow(ts, k, realValue: v));
+      }
     } else if (t == PacketType.realtimeRawData.rawValue) {
       // Fallback (rare during a plain type-47 offload): HR/RR off the type-43 header. Its timestamp is
       // a device-epoch value, so it DOES get the wall-clock offset.
@@ -1080,6 +1164,7 @@ StreamBatch extractHistoricalStreams(
     sleepState: sleepState,
     ppgHr: ppgHr,
     ppgRaw: ppgRaw,
+    rawFields: rawFields,
     droppedImplausibleTs: droppedImplausible,
   );
 }

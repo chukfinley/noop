@@ -5,7 +5,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:noop/core/data/db/database.dart';
 
-/// Migration tests for [AppDatabase] (schemaVersion 3).
+/// Migration tests for [AppDatabase] (schemaVersion 4).
 ///
 /// The Wave-D1 additive migration must be correct AND idempotent from EVERY
 /// prior version. The bug this pins (MASTER-BACKLOG §4 HIGH-1): the `from < 2`
@@ -78,6 +78,51 @@ const _v2GravitySample =
     'synced INTEGER NOT NULL DEFAULT 0, '
     'PRIMARY KEY (device_id, ts))';
 
+/// The v3 shape of the two whoop stream tables — built WITH the new-in-v3 columns
+/// (hr_fixed88/onwrist, dynamic_accel) but WITHOUT anything new-in-v4, so a v3→v4
+/// upgrade only needs to create the brand-new `rawFieldSample` table.
+const _v3HrSample =
+    'CREATE TABLE hrSample ('
+    'device_id TEXT NOT NULL, '
+    'ts INTEGER NOT NULL, '
+    'bpm INTEGER NOT NULL, '
+    'hr_fixed88 INTEGER, '
+    'onwrist INTEGER, '
+    'synced INTEGER NOT NULL DEFAULT 0, '
+    'PRIMARY KEY (device_id, ts))';
+
+const _v3GravitySample =
+    'CREATE TABLE gravitySample ('
+    'device_id TEXT NOT NULL, '
+    'ts INTEGER NOT NULL, '
+    'x REAL NOT NULL, '
+    'y REAL NOT NULL, '
+    'z REAL NOT NULL, '
+    'dynamic_accel REAL, '
+    'synced INTEGER NOT NULL DEFAULT 0, '
+    'PRIMARY KEY (device_id, ts))';
+
+const _v3PpgRawSample =
+    'CREATE TABLE ppgRawSample ('
+    'device_id TEXT NOT NULL, '
+    'ts INTEGER NOT NULL, '
+    'sample_count INTEGER NOT NULL, '
+    'samples BLOB NOT NULL, '
+    'PRIMARY KEY (device_id, ts))';
+
+/// `raw_sensor_archive` AS IT EXISTED AT v3 — WITH the trim_cursor/family columns
+/// already added, so the v3→v4 path must NOT re-add them.
+const _v3RawSensorArchive =
+    'CREATE TABLE raw_sensor_archive ('
+    'id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, '
+    'captured_at_ms INTEGER NOT NULL, '
+    'characteristic TEXT, '
+    'packet_type INTEGER, '
+    'spo2_raw_adc INTEGER, '
+    'raw_hex TEXT NOT NULL, '
+    'trim_cursor INTEGER, '
+    'family TEXT)';
+
 /// Column names on a table, from sqlite's own `table_info` pragma.
 Future<Set<String>> _columns(AppDatabase db, String table) async {
   final rows = await db.customSelect('PRAGMA table_info($table)').get();
@@ -102,11 +147,14 @@ void main() {
     await db.customSelect('SELECT 1').get();
 
     expect(await _tableExists(db, 'ppgRawSample'), isTrue);
+    expect(await _tableExists(db, 'rawFieldSample'), isTrue);
     expect(await _columns(db, 'hrSample'),
         containsAll(['hr_fixed88', 'onwrist']));
     expect(await _columns(db, 'gravitySample'), contains('dynamic_accel'));
     expect(await _columns(db, 'raw_sensor_archive'),
         containsAll(['trim_cursor', 'family']));
+    expect(await _columns(db, 'rawFieldSample'),
+        containsAll(['device_id', 'ts', 'key', 'int_value', 'real_value']));
   });
 
   test('v1 → v3 upgrade opens without throwing; new cols exist EXACTLY once',
@@ -133,6 +181,8 @@ void main() {
     expect(await _tableExists(db, 'syncCursor'), isTrue);
     expect(await _columns(db, 'raw_sensor_archive'),
         containsAll(['trim_cursor', 'family']));
+    // New-in-v4 long-format capture table applied on the v1 path too.
+    expect(await _tableExists(db, 'rawFieldSample'), isTrue);
   });
 
   test('v2 → v3 upgrade adds new-in-v3 columns/table to existing v2 tables',
@@ -151,8 +201,47 @@ void main() {
     expect(hr, containsAll(['hr_fixed88', 'onwrist']));
     expect(await _columns(db, 'gravitySample'), contains('dynamic_accel'));
     expect(await _tableExists(db, 'ppgRawSample'), isTrue);
+    expect(await _tableExists(db, 'rawFieldSample'), isTrue);
     expect(await _columns(db, 'raw_sensor_archive'),
         containsAll(['trim_cursor', 'family']));
+  });
+
+  test('v3 → v4 upgrade adds ONLY the new rawFieldSample table (idempotent)',
+      () async {
+    // A v3 DB: whoop tables + archive already carry all new-in-v3 columns; only the
+    // new-in-v4 `rawFieldSample` table is missing.
+    final file = await _seedOldDb(3, [
+      _v3RawSensorArchive,
+      _v3HrSample,
+      _v3GravitySample,
+      _v3PpgRawSample,
+    ]);
+    addTearDown(() => file.parent.deleteSync(recursive: true));
+
+    final db = AppDatabase.forTesting(NativeDatabase(file));
+    addTearDown(db.close);
+    await db.customSelect('SELECT 1').get(); // drives onUpgrade(3, 4)
+
+    // The brand-new table exists; nothing pre-existing was duplicated/rewritten.
+    expect(await _tableExists(db, 'rawFieldSample'), isTrue);
+    expect(await _columns(db, 'rawFieldSample'),
+        containsAll(['device_id', 'ts', 'key', 'int_value', 'real_value']));
+    expect(await _columns(db, 'hrSample'),
+        containsAll(['hr_fixed88', 'onwrist']));
+    expect(await _columns(db, 'gravitySample'), contains('dynamic_accel'));
+
+    // The migrated DB is usable: a raw-field insert round-trips.
+    await db.insertWhoopRawFields([
+      WhoopRawFieldSamplesCompanion.insert(
+        deviceId: 'strap-1',
+        ts: 1700000000,
+        key: 'status_word',
+        intValue: const Value(1792),
+      ),
+    ]);
+    final rows = await db.select(db.whoopRawFieldSamples).get();
+    expect(rows.single.intValue, 1792);
+    expect(rows.single.realValue, null);
   });
 
   test('migrated v1 DB is usable — round-trips a whoop HR insert', () async {

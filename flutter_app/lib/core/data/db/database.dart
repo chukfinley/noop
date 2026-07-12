@@ -639,6 +639,30 @@ class WhoopGravitySamples extends Table {
   Set<Column> get primaryKey => {deviceId, ts};
 }
 
+/// Long-format capture of the WHOOP 5/MG v18 per-second fields the historical
+/// decoder produces but that have no typed column of their own — `record_index`,
+/// `cardiac_flags`/`cardiac_status`, `rr_packed`, `step_cadence`,
+/// `motion_wear_quality`, the aux thermal registers (`temp_aux_1/2_raw`), the
+/// status words (`status_word`/`_1`/`_2`), `wake_quality`, `aux_byte_82`, and the
+/// unknown float (`unknown_f32_113`). Room `rawFieldSample` (new-in-v4). Each is a
+/// genuine strap-emitted byte that used to be dropped one line before the store; a
+/// catch-all so no decoded value is lost without a column-per-field explosion.
+/// Exactly one of [intValue]/[realValue] is set per row (integer registers vs the
+/// one float). Append-only, idempotent on (deviceId, ts, key). PK (deviceId, ts,
+/// key).
+class WhoopRawFieldSamples extends Table {
+  TextColumn get deviceId => text()();
+  IntColumn get ts => integer()(); // unix seconds
+  TextColumn get key => text()(); // e.g. 'status_word', 'step_cadence'
+  IntColumn get intValue => integer().nullable()();
+  RealColumn get realValue => real().nullable()();
+
+  @override
+  String get tableName => 'rawFieldSample';
+  @override
+  Set<Column> get primaryKey => {deviceId, ts, key};
+}
+
 /// Durable key/value cursor store for the historical-offload safe-trim
 /// watermark (`strap_trim`). Mirrors the native `PrefsTrimCursorStore`: a small
 /// KV separate from the sensor rows, written AFTER decoded rows are durable and
@@ -690,6 +714,7 @@ class SyncCursors extends Table {
   WhoopSleepStateSamples,
   WhoopRespSamples,
   WhoopGravitySamples,
+  WhoopRawFieldSamples,
   SyncCursors,
 ])
 class AppDatabase extends _$AppDatabase {
@@ -700,7 +725,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.e);
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -758,6 +783,16 @@ class AppDatabase extends _$AppDatabase {
               await m.addColumn(
                   whoopGravitySamples, whoopGravitySamples.dynamicAccel);
             }
+          }
+          // v3 → v4: capture EVERY decoded-but-uncolumned WHOOP5 v18 field into a new
+          // append-only long-format table (`rawFieldSample`). Purely additive — a
+          // brand-new table only, no existing column meaning changes, nothing dropped or
+          // rewritten. `WhoopRawFieldSamples` is new-in-v4, so it is never created by any
+          // earlier step: create it on every pre-v4 path (v1→v4, v2→v4, v3→v4) — idempotent
+          // because it can't already exist on a genuine <v4 DB. (Stepwise pattern mirrors
+          // the from<3 `whoopPpgRawSamples` create above.)
+          if (from < 4) {
+            await m.createTable(whoopRawFieldSamples);
           }
         },
         beforeOpen: (details) async {
@@ -827,6 +862,13 @@ class AppDatabase extends _$AppDatabase {
 
   Future<int> insertWhoopGravity(List<WhoopGravitySamplesCompanion> rows) =>
       _insertIgnoreCounting(whoopGravitySamples, rows);
+
+  /// Decoded-but-uncolumned v18 raw fields (long-format). Persist-only, NOT counted —
+  /// no consumer reads a count. Append-only, idempotent on (deviceId, ts, key) so a
+  /// re-offload of the same strap-second is a no-op (immutability preserved).
+  Future<void> insertWhoopRawFields(
+          List<WhoopRawFieldSamplesCompanion> rows) async =>
+      _insertIgnoreCounting(whoopRawFieldSamples, rows);
 
   /// Append one or more raw undecodable BLE frames to [RawSensorArchive] durably.
   /// Append-only (autoincrement id, no natural key) — mirrors the Kotlin

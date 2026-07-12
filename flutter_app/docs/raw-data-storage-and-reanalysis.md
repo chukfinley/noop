@@ -89,24 +89,29 @@ parser's keys are threaded through `extractHistoricalStreams` → `StreamBatch` 
 | `onwrist` (@81 bits 0-1) | **on-wrist flag** (wear gating) | `hrSample.onwrist` | **PERSISTED** ✓ |
 | `dynamic_acceleration` | per-second motion scalar (0–8 g) | `gravitySample.dynamicAccel` | **PERSISTED** ✓ |
 
-Still **DROPPED** (low-value raw/status bytes — deliberately not captured; documented):
+The remaining v18 per-second fields are now **PERSISTED** (v4) — captured long-format
+into the append-only `rawFieldSample` table `(deviceId, ts, key) -> intValue|realValue`,
+threaded on `StreamBatch.rawFields` from `extractHistoricalStreams` → the drift insert.
+Every field the decoder produces now reaches the store; nothing decoded is dropped.
 
-| Decoded key | What it is | Verdict |
-|---|---|---|
-| `wake_quality` (@81 bits 2-3) | band wake-quality field | DROPPED |
-| `motion_wear_quality` (@63) | wear-quality 0–2 | DROPPED |
-| `step_cadence` (@59) | per-step cadence byte | DROPPED |
-| `cardiac_flags` (@33) | cardiac status flags | DROPPED |
-| `cardiac_status` (@40) | cardiac status | DROPPED |
-| `rr_packed` (@38) | packed R-R word | DROPPED |
-| `record_index` (@11) | per-record counter | DROPPED |
-| `temp_aux_1_raw` / `temp_aux_2_raw` (@69/@71) | aux thermal | DROPPED |
-| `status_word` / `_1` / `_2` (@75/@77/@79) | status words | DROPPED |
-| `aux_byte_82` (@82) | raw aux byte | DROPPED |
-| `unknown_f32_113` (@113) | unknown f32 | DROPPED |
+| Decoded key | What it is | Column | Verdict |
+|---|---|---|---|
+| `wake_quality` (@81 bits 2-3) | band wake-quality field | `rawFieldSample` (int) | **PERSISTED** ✓ |
+| `motion_wear_quality` (@63) | wear-quality 0–2 | `rawFieldSample` (int) | **PERSISTED** ✓ |
+| `step_cadence` (@59) | per-step cadence byte | `rawFieldSample` (int) | **PERSISTED** ✓ |
+| `cardiac_flags` (@33) | cardiac status flags | `rawFieldSample` (int) | **PERSISTED** ✓ |
+| `cardiac_status` (@40) | cardiac status | `rawFieldSample` (int) | **PERSISTED** ✓ |
+| `rr_packed` (@38) | packed R-R word | `rawFieldSample` (int) | **PERSISTED** ✓ |
+| `record_index` (@11) | per-record counter | `rawFieldSample` (int) | **PERSISTED** ✓ |
+| `temp_aux_1_raw` / `temp_aux_2_raw` (@69/@71) | aux thermal | `rawFieldSample` (int) | **PERSISTED** ✓ |
+| `status_word` / `_1` / `_2` (@75/@77/@79) | status words | `rawFieldSample` (int) | **PERSISTED** ✓ |
+| `aux_byte_82` (@82) | raw aux byte | `rawFieldSample` (int) | **PERSISTED** ✓ |
+| `unknown_f32_113` (@113) | unknown f32 | `rawFieldSample` (real) | **PERSISTED** ✓ |
 
-Most are low-value raw/status bytes; the three physiologically-meaningful ones
-(`hr_fixed_8_8`, `onwrist`, `dynamic_acceleration`) are now persisted (see above).
+The three physiologically-meaningful ones (`hr_fixed_8_8`, `onwrist`,
+`dynamic_acceleration`) have their own typed columns (see above); the rest ride the
+generic long-format `rawFieldSample` catch-all, so the whole decoded v18 record is now
+durable and re-derivable.
 
 ### Historical offload — WHOOP 5/MG v26 (raw PPG)
 
@@ -247,10 +252,28 @@ migration (no drop/wipe; append-only immutability preserved):
 3. ✅ **Raw v26 PPG waveform stored** — new append-only `ppgRawSample` table (one row per
    strap-second, 24 i16 samples packed LE), carried on `StreamBatch.ppgRaw`.
 
-The ~12 low-value v18 status/aux bytes (`wake_quality`, `motion_wear_quality`,
-`step_cadence`, `cardiac_flags`/`cardiac_status`, `rr_packed`, `record_index`,
-`temp_aux_1/2_raw`, `status_word*`, `aux_byte_82`, `unknown_f32_113`) are intentionally
-**not** captured — documented as skipped, low-value.
+## DONE (v4, schema 3 → 4) — the last decoded-but-dropped fields are CAPTURED
+
+The ~14 remaining v18 per-second fields the decoder produced but had no column for
+(`wake_quality`, `motion_wear_quality`, `step_cadence`, `cardiac_flags`/`cardiac_status`,
+`rr_packed`, `record_index`, `temp_aux_1/2_raw`, `status_word`/`_1`/`_2`, `aux_byte_82`,
+`unknown_f32_113`) are now **captured** into a new append-only long-format table
+`rawFieldSample` `(deviceId, ts, key) -> intValue|realValue`, idempotent on the natural
+key so a re-offload is a no-op (immutability preserved). Threaded on `StreamBatch.rawFields`
+from `extractHistoricalStreams` → `DriftStreamRepository.insert`. Additive migration (new
+table only; no column meaning changed, nothing dropped/rewritten), with a v3→v4 migration
+test and a decode→persist round-trip + idempotency test
+(`test/ble/sync/raw_data_loss_test.dart` Fix 4, `test/db/migration_test.dart`). Every field
+the historical decoder emits now reaches a durable column — the "all raw data" promise holds
+for the whole decoded v18 record.
+
+Channels NOT captured — honest negatives (see
+`docs/reverse/untapped-data-channels.md` §4/§5): live raw DSP (type 43), realtime/historical
+IMU (types 51/52), WHOOP4 optical PPG, body-location (0x54), extended battery (0x62) all
+require SENDING a battery-costly opt-in command AND have on-wire byte layouts that are NOT
+byte-confirmed (open questions answerable only by an on-device capture, which the test-only
+workflow cannot do — inventing offsets would poison the typed store). Stress, GPS/route,
+WHOOP4 step count and workout auto-detect are server-side/derived, not strap channels.
 
 ## Re-analysis strategy — design note
 
