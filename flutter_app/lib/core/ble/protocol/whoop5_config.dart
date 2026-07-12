@@ -32,6 +32,23 @@ class Whoop5Config {
   /// with the Swift `Whoop5Config.setDeviceConfigCmd`. (#181)
   static const int setDeviceConfigCmd = 0x77;
 
+  /// The confirmed Broadcast-HR device-config KEY: setting it makes the strap advertise its heart rate
+  /// as a standard 0x180D BLE HR sensor (live HR in the manufacturer data), so a Garmin / Zwift / gym
+  /// receiver can pair to the strap directly. Validated on real hardware (paired on a Garmin Edge 840,
+  /// spec §4). Value byte is an ASCII digit: '1'(0x31)=on / '0'(0x30)=off.
+  static const String broadcastHrKey = 'whoop_live_hr_in_adv_ind_pkt';
+
+  /// The full SET_DEVICE_CONFIG (0x77) command PAYLOAD for one device-config write: the b3 lead byte
+  /// (0x01, like CLIENT_HELLO) ahead of the 33-byte [deviceConfigBody]. Hand this to the puffin framer
+  /// with cmd [setDeviceConfigCmd]. Mirrors the Kotlin `setBroadcastHr` body (WhoopBleClient.kt:3812).
+  static Uint8List deviceConfigPayload(String name, int value) {
+    final body = deviceConfigBody(name, value);
+    final payload = Uint8List(1 + body.length);
+    payload[0] = 0x01;
+    payload.setRange(1, 1 + body.length, body);
+    return payload;
+  }
+
   /// The exact ordered enable sequence the official app sends, transcribed verbatim from
   /// judes.club's frame-builder FLAGS array. `enable_r22_packets` opens the type-0x2F biometric
   /// stream; the rest tune channel selection, wear detection and sleep behaviour. Keep in lockstep

@@ -42,6 +42,7 @@ import '../protocol/alarm_payload.dart';
 import '../protocol/device_family.dart';
 import '../protocol/enums.dart';
 import '../protocol/framing.dart';
+import '../protocol/haptic_clock.dart';
 import '../protocol/historical_streams.dart';
 import '../protocol/parsed_frame.dart';
 import '../protocol/streams.dart';
@@ -922,6 +923,67 @@ class WhoopBleClient {
         ((f[off + 1] & 0xFF) << 8) |
         ((f[off + 2] & 0xFF) << 16) |
         ((f[off + 3] & 0xFF) << 24);
+  }
+
+  // ============================================================================================
+  // Haptics + device config (device-config-and-haptics spec §4/§6) — buzz/locate + Broadcast-HR
+  // ============================================================================================
+
+  /// Buzz the strap once so the user can LOCATE it on the wrist (spec §6). Family-aware, both forms
+  /// mirror the confirmed official-app buzz:
+  ///  - WHOOP 5.0/MG → the one-shot "maverick" notification buzz, cmd 0x13
+  ///    ([CommandNumber.runHapticPatternMaverick]) carrying the 12-byte DRV2625 notify body
+  ///    ([HapticPattern.maverickNotifyBody]). A raw legacy 79 is rejected on real MG (spec §6.2), so
+  ///    the correct opcode is sent per family — no un-honored write ever goes out.
+  ///  - WHOOP 4.0 → the legacy `RUN_HAPTICS_PATTERN` (cmd 79) with `[patternId 2, loops, 0,0,0]`.
+  ///
+  /// Written with response (the char supports it, mirroring the Kotlin acked buzz). No-op (logs) when
+  /// there is no command characteristic (disconnected) — safe on every non-device path, so a plain
+  /// `flutter test` never buzzes. [loops] applies to the WHOOP 4.0 form only.
+  Future<void> runHaptic({int loops = 3}) async {
+    final ch = _cmdChar;
+    if (ch == null) {
+      _log('runHaptic ignored — no strap link');
+      return;
+    }
+    final CommandNumber cmd;
+    final Uint8List body;
+    if (_family == DeviceFamily.whoop5) {
+      cmd = CommandNumber.runHapticPatternMaverick; // 0x13
+      body = HapticPattern.maverickNotifyBody();
+    } else {
+      cmd = CommandNumber.runHapticsPattern; // 0x4F
+      body = HapticPattern.whoop4BuzzBody(loops: loops);
+    }
+    _log('Haptics: locate buzz (${_family.name}, cmd 0x'
+        '${cmd.rawValue.toRadixString(16)})');
+    await _write(ch, _frameFor(cmd, body));
+  }
+
+  /// Enable/disable Broadcast-HR on the strap (spec §4): one SET_DEVICE_CONFIG (0x77) write of the
+  /// confirmed key [Whoop5Config.broadcastHrKey] = '1'/'0', which makes the strap advertise its heart
+  /// rate as a standard 0x180D BLE sensor a Garmin / Zwift / gym receiver can pair to directly. This is
+  /// a WHOOP 5.0/MG device-config (0x77 is a puffin command) — a no-op (logs) on WHOOP 4.0 or with no
+  /// link. Confirmed on real hardware (paired on a Garmin Edge 840), so it is NOT gated behind the
+  /// experimental opt-in. Reversible (write '0' to turn it back off).
+  Future<void> setDeviceConfig({required bool broadcastHr}) async {
+    final ch = _cmdChar;
+    if (ch == null) {
+      _log('setDeviceConfig ignored — no strap link');
+      return;
+    }
+    if (_family != DeviceFamily.whoop5) {
+      _log('setDeviceConfig ignored — Broadcast-HR is a WHOOP 5/MG device-config (not WHOOP 4.0)');
+      return;
+    }
+    final value = broadcastHr ? 0x31 : 0x30; // ASCII '1' / '0'
+    _log('Device config: Broadcast-HR ${broadcastHr ? 'ON' : 'OFF'} '
+        '(SET_DEVICE_CONFIG ${Whoop5Config.broadcastHrKey})');
+    await _write(
+      ch,
+      _frameFor(CommandNumber.setDeviceConfig,
+          Whoop5Config.deviceConfigPayload(Whoop5Config.broadcastHrKey, value)),
+    );
   }
 
   /// Release all resources. Safe to call multiple times.

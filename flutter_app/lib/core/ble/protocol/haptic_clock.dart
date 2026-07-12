@@ -1,4 +1,42 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
+
+/// DRV2625 haptic-pattern WIRE PAYLOADS — the bytes a "buzz" command carries (device-config-and-haptics
+/// spec §5/§6). Pure, no I/O: body-out only; the transport frames these for the family and writes them.
+///
+/// Confirmed byte-for-byte from the decompiled official WHOOP app (`NotificationHapticsPattern` +
+/// `h0`) and the Kotlin `WhoopBleClient` reference — the same "notify" preset (effects 47 & 152) drives
+/// both the notification buzz here and the alarm wake in `alarm_payload.dart`.
+class HapticPattern {
+  HapticPattern._();
+
+  /// The two DRV2625 waveform-library sequence entries the "notify"/wake preset uses. Only these two of
+  /// the eight effect slots are populated; the rest are zero. Kept in lock-step with
+  /// `alarm_payload.dart` (which embeds the same pair in the strap-armed alarm haptic).
+  static const int notifyEffect1 = 47;
+  static const int notifyEffect2 = 152;
+
+  /// The 12-byte WHOOP 5.0/MG "maverick" notification-haptic body (LITTLE_ENDIAN), confirmed from the
+  /// official app: `[0x01 lead][8×waveFormEffect u8][loopControlForEffects u16 LE][overallWaveformLoop
+  /// u8]`. The notify preset = effects 47,152 then six zeros, loop 0, overall 0. This is exactly the
+  /// body the 5/MG one-shot buzz (`RUN_HAPTIC_PATTERN_MAVERICK`, cmd 0x13) carries; a raw legacy 79 is
+  /// rejected on real MG hardware (spec §6.2), so the transport sends 0x13 with these bytes on 5/MG.
+  static Uint8List maverickNotifyBody() => Uint8List.fromList(<int>[
+        0x01,
+        notifyEffect1,
+        notifyEffect2,
+        0, 0, 0, 0, 0, 0, // effects 3..8
+        0, 0, // loopControlForEffects u16 LE
+        0, // overallWaveformLoopControl
+      ]);
+
+  /// The 5-byte WHOOP 4.0 legacy `RUN_HAPTICS_PATTERN` (cmd 79) body: `[patternId, loops, 0, 0, 0]`.
+  /// `patternId` 2 is the graduated buzz the official app uses for a locate/notify tap (spec §6.1).
+  /// [loops] is clamped to a byte.
+  static Uint8List whoop4BuzzBody({int patternId = 2, int loops = 3}) =>
+      Uint8List.fromList(
+          <int>[patternId & 0xFF, loops.clamp(0, 255) & 0xFF, 0, 0, 0]);
+}
 
 /// Faithful Dart port of `HapticClock.kt`.
 ///

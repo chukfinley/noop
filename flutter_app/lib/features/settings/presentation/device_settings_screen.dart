@@ -37,6 +37,15 @@ import 'package:noop/core/theme/palette.dart';
 final _deviceNameOverride =
     StateProvider<String?>((_) => Prefs.instance.deviceNameOverride);
 
+/// UI-local state for the on-strap Broadcast-HR device-config (SET_DEVICE_CONFIG 0x77,
+/// key whoop_live_hr_in_adv_ind_pkt). Distinct from the phone-side re-broadcast toggle
+/// ([hrBroadcastEnabledProvider]): this makes the STRAP itself advertise its HR as a
+/// standard 0x180D sensor, so a receiver can read it even with the phone away. Only
+/// surfaced when linked to a WHOOP 5·MG (0x77 is a puffin command). Defaults off; not
+/// persisted (the write is confirmed on hardware but the reconnect re-apply is out of
+/// scope here) — the transport no-ops off-device, so this stays inert in tests.
+final _strapBroadcastHr = StateProvider<bool>((_) => false);
+
 /// Device settings — the strap's LIVE charge, connection, sync status, rename,
 /// firmware entry and a broadcast-heart-rate switch. Opened from the battery
 /// pill on Today.
@@ -86,6 +95,7 @@ class DeviceSettingsScreen extends ConsumerWidget {
     final sync = ref.watch(syncProgressProvider).value;
     final paired = ref.watch(pairedStrapProvider);
     final broadcast = ref.watch(hrBroadcastEnabledProvider);
+    final strapBroadcast = ref.watch(_strapBroadcastHr);
     final bgSync = ref.watch(backgroundSyncEnabledProvider);
     final name = resolveDeviceName(paired, ref.watch(_deviceNameOverride));
     final syncState = ref.watch(syncStateProvider);
@@ -244,6 +254,18 @@ class DeviceSettingsScreen extends ConsumerWidget {
                 onTap: () =>
                     Navigator.of(context).push(noopRoute(const AlarmsScreen())),
               ),
+          // Locate / buzz the strap over BLE. Only meaningful with a live link, so
+          // hidden until connected (the transport no-ops with no characteristic).
+          if (linked)
+            (r) => SettingsTile(
+                  radius: r,
+                  icon: Icons.vibration_rounded,
+                  iconColor: Palette.metricAmber,
+                  title: 'Locate strap',
+                  detail: 'Buzz the band to find it on your wrist',
+                  trailing: _chevron,
+                  onTap: () => _locateStrap(context, ref),
+                ),
           (r) => SettingsTile(
                 radius: r,
                 icon: Icons.restart_alt_rounded,
@@ -290,6 +312,34 @@ class DeviceSettingsScreen extends ConsumerWidget {
                       broadcast ? Palette.statusPositive : Palette.textTertiary,
                 ),
               ),
+          // On-STRAP Broadcast-HR (SET_DEVICE_CONFIG 0x77): the band itself advertises
+          // its HR as a standard 0x180D sensor, readable even with the phone away.
+          // WHOOP 5·MG only (0x77 is a puffin command), so only shown when linked to one.
+          if (linked && paired?.family == DeviceFamily.whoop5)
+            (r) => SettingsTile(
+                  radius: r,
+                  icon: Icons.sensors_rounded,
+                  iconColor: strapBroadcast
+                      ? Palette.metricRose
+                      : Palette.textTertiary,
+                  title: 'Broadcast HR from strap',
+                  detail:
+                      'Have the WHOOP band itself advertise your heart rate as a '
+                      'standard Bluetooth sensor — a Garmin, Zwift or gym machine '
+                      'can read it directly, even when your phone is away.',
+                  trailing: NoopToggle(
+                    value: strapBroadcast,
+                    onChanged: (v) => _setStrapBroadcastHr(ref, v),
+                  ),
+                  below: _StatusDot(
+                    label: strapBroadcast
+                        ? 'On · strap advertises HR (0x180D)'
+                        : 'Off',
+                    color: strapBroadcast
+                        ? Palette.statusPositive
+                        : Palette.textTertiary,
+                  ),
+                ),
         ]),
 
         // ── Background sync ─────────────────────────────────────────────────
@@ -425,6 +475,23 @@ class DeviceSettingsScreen extends ConsumerWidget {
     unawaited(Prefs.instance.setBackgroundSyncEnabled(value));
     final service = ref.read(backgroundSyncServiceProvider);
     unawaited(value ? service.start() : service.stop());
+  }
+
+  /// Buzz the connected strap so the user can find it on the wrist. Fires the confirmed
+  /// per-family locate haptic ([WhoopBleClient.runHaptic]); the transport no-ops with no
+  /// live link, so this is safe to tap and inert off-device.
+  static Future<void> _locateStrap(BuildContext context, WidgetRef ref) async {
+    noopToast(context, 'Buzzing strap…');
+    await ref.read(whoopBleClientProvider).runHaptic();
+  }
+
+  /// Flip the on-strap Broadcast-HR device-config: update the UI-local provider so the
+  /// toggle reflects it immediately, then write SET_DEVICE_CONFIG over BLE
+  /// ([WhoopBleClient.setDeviceConfig]). The transport no-ops off a WHOOP 5·MG / with no
+  /// link, so this stays inert everywhere but a real linked 5·MG strap.
+  static Future<void> _setStrapBroadcastHr(WidgetRef ref, bool value) async {
+    ref.read(_strapBroadcastHr.notifier).state = value;
+    await ref.read(whoopBleClientProvider).setDeviceConfig(broadcastHr: value);
   }
 
   /// Automatic connect: `connectRemembered()` reconnects the remembered band, or
