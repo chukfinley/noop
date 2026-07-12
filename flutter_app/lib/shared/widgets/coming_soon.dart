@@ -194,6 +194,55 @@ class ComingSoonOverlay extends StatelessWidget {
   }
 }
 
+/// Full-body EMPTY state for the live build before any strap data has synced.
+/// The app ships with NO bundled history, so every day-driven surface (Today,
+/// Sleep, Trends, the metric detail screens) shows this until the WHOOP strap
+/// offloads its first rows — after which the first days calibrate over the next
+/// few nights. On-brand (Palette/NoopType/Metrics), never a fabricated number.
+class ConnectStrapView extends StatelessWidget {
+  final String title;
+  final String message;
+  const ConnectStrapView({
+    super.key,
+    this.title = 'Connect your WHOOP to start',
+    this.message =
+        'No data yet. Sync your strap and your first days will calibrate over the next few nights.',
+  });
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: Padding(
+          padding:
+              const EdgeInsets.symmetric(horizontal: Metrics.screenPadding),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 72,
+                height: 72,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Palette.accent.withValues(alpha: 0.12),
+                ),
+                child: Icon(Icons.bluetooth_searching_rounded,
+                    size: 30, color: Palette.accent),
+              ),
+              const SizedBox(height: Metrics.space18),
+              Text(title,
+                  textAlign: TextAlign.center,
+                  style: NoopType.title2.copyWith(color: Palette.textPrimary)),
+              const SizedBox(height: Metrics.space10),
+              Text(message,
+                  textAlign: TextAlign.center,
+                  style: NoopType.body
+                      .copyWith(color: Palette.textTertiary, height: 1.4)),
+            ],
+          ),
+        ),
+      );
+}
+
 /// A centred, full-body "coming soon" state — an icon, a title and a short
 /// explanatory line — for screens with no real data yet (Workouts, Journal).
 class ComingSoonView extends StatelessWidget {

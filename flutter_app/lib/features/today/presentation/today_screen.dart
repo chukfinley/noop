@@ -12,6 +12,7 @@ import 'package:noop/core/ble/transport/whoop_providers.dart';
 import 'package:noop/shared/widgets/backgrounds.dart';
 import 'package:noop/shared/widgets/behavior.dart';
 import 'package:noop/shared/widgets/cards.dart';
+import 'package:noop/shared/widgets/coming_soon.dart';
 import 'package:noop/shared/widgets/health_charts.dart';
 import 'package:noop/shared/widgets/metric_gauge.dart';
 import 'package:noop/shared/widgets/motion.dart';
@@ -40,6 +41,13 @@ class TodayScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final days = ref.watch(daysProvider);
+    // No strap data synced yet → the whole home surface is the empty/calibrating
+    // state (never a crash or a fabricated day).
+    if (days.isEmpty) {
+      return const ScenicBackground(
+        child: SafeArea(child: ConnectStrapView()),
+      );
+    }
     final maxI = days.length - 1;
     final idx = ref.watch(selectedDayIndexProvider).clamp(0, maxI);
     final day = days[idx];

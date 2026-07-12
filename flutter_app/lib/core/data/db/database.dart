@@ -863,6 +863,16 @@ class AppDatabase extends _$AppDatabase {
   Future<int> insertWhoopGravity(List<WhoopGravitySamplesCompanion> rows) =>
       _insertIgnoreCounting(whoopGravitySamples, rows);
 
+  /// Fires whenever synced WHOOP biometric rows change — the HR / RR / gravity
+  /// streams the live analytics are derived from. The live repository listens to
+  /// this so scores re-derive as new syncs land (debounced by the caller). Other
+  /// table writes (water/weight/nutrition) are intentionally excluded.
+  Stream<void> watchWhoopStreams() => tableUpdates(TableUpdateQuery.allOf([
+        TableUpdateQuery.onTable(whoopHrSamples),
+        TableUpdateQuery.onTable(whoopRrIntervals),
+        TableUpdateQuery.onTable(whoopGravitySamples),
+      ])).map((_) {});
+
   /// Decoded-but-uncolumned v18 raw fields (long-format). Persist-only, NOT counted —
   /// no consumer reads a count. Append-only, idempotent on (deviceId, ts, key) so a
   /// re-offload of the same strap-second is a no-op (immutability preserved).

@@ -48,13 +48,18 @@ final profileProvider = Provider<UserProfile>((ref) {
 /// All days oldest → newest.
 final daysProvider = Provider<List<DayRecord>>((ref) => ref.watch(repositoryProvider).days);
 
-/// Index into [daysProvider]; defaults to the latest day.
-final selectedDayIndexProvider = StateProvider<int>(
-  (ref) => ref.watch(daysProvider).length - 1,
-);
+/// Index into [daysProvider]; defaults to the latest day. Clamps to 0 when the
+/// live day list is still empty (no strap data synced yet) so it never underflows.
+final selectedDayIndexProvider = StateProvider<int>((ref) {
+  final n = ref.watch(daysProvider).length;
+  return n == 0 ? 0 : n - 1;
+});
 
-final selectedDayProvider = Provider<DayRecord>((ref) {
+/// The day the user is looking at, or null when there are no days yet (the
+/// cold-start live state). Screens guard on this / on `daysProvider.isEmpty`.
+final selectedDayProvider = Provider<DayRecord?>((ref) {
   final days = ref.watch(daysProvider);
+  if (days.isEmpty) return null;
   final i = ref.watch(selectedDayIndexProvider).clamp(0, days.length - 1);
   return days[i];
 });

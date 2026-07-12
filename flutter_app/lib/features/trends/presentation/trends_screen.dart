@@ -34,6 +34,13 @@ class TrendsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final days = ref.watch(daysProvider);
+    // No strap data synced yet → the metric grid has nothing to plot; show the
+    // empty/calibrating state instead of indexing an empty day list.
+    if (days.isEmpty) {
+      return const ScenicBackground(
+        child: SafeArea(child: ConnectStrapView()),
+      );
+    }
     final weightLog = ref.watch(weightLogProvider);
     final waterLog = ref.watch(waterLogProvider);
     final profile = ref.watch(profileProvider);

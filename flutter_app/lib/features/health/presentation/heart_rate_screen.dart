@@ -5,6 +5,7 @@ import 'package:noop/core/data/models.dart';
 import 'package:noop/core/state/format.dart';
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/shared/widgets/cards.dart';
+import 'package:noop/shared/widgets/coming_soon.dart';
 import 'package:noop/shared/widgets/controls.dart';
 import 'package:noop/shared/widgets/health_charts.dart';
 import 'package:noop/shared/widgets/scaffold.dart';
@@ -130,6 +131,17 @@ class _HeartRateScreenState extends ConsumerState<HeartRateScreen> {
   @override
   Widget build(BuildContext context) {
     final days = ref.watch(daysProvider);
+    if (days.isEmpty) {
+      return const ScreenScaffold(
+        title: 'Heart rate',
+        children: [
+          Padding(
+            padding: EdgeInsets.only(top: 72),
+            child: ConnectStrapView(),
+          ),
+        ],
+      );
+    }
     final maxI = days.length - 1;
     final idx = ref.watch(selectedDayIndexProvider).clamp(0, maxI);
     final day = days[idx];

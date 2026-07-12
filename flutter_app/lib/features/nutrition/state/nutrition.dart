@@ -20,8 +20,9 @@ extension MealTypeLabel on MealType {
 }
 
 /// The ISO `yyyy-MM-dd` key for the currently-selected day (drives the reads).
-final selectedIsoDayProvider =
-    Provider<String>((ref) => isoDay(ref.watch(selectedDayProvider).date));
+/// Falls back to today when there are no synced days yet (empty live state).
+final selectedIsoDayProvider = Provider<String>((ref) =>
+    isoDay(ref.watch(selectedDayProvider)?.date ?? DateTime.now()));
 
 /// Rolled-up nutrition totals for the selected day.
 final dayNutritionProvider = StreamProvider<DayNutrition>((ref) {

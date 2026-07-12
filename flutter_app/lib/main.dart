@@ -1,4 +1,4 @@
-import 'dart:async' show unawaited;
+import 'dart:async' show Timer, unawaited;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,7 +8,7 @@ import 'package:noop/core/data/nutrition/off_client.dart';
 import 'package:noop/core/ble/background/background_sync_service.dart';
 import 'package:noop/core/ble/background/background_sync_scheduler.dart';
 import 'package:noop/core/ble/transport/whoop_providers.dart';
-import 'package:noop/core/data/real_repository.dart';
+import 'package:noop/core/data/live_repository.dart';
 import 'package:noop/core/data/repository.dart';
 import 'package:noop/core/state/log_store.dart';
 import 'package:noop/core/state/prefs.dart';
@@ -31,14 +31,17 @@ Future<void> main() async {
   final db = AppDatabase();
   await LogStore.instance.loadFrom(db);
 
-  // Score the real bundled Whoop capture through the ported analytics; fall
-  // back to the deterministic mock only if the asset can't be read.
+  // LIVE, strap-synced data ONLY — no bundled history. The app starts EMPTY and
+  // scores real strap syncs from the drift stream tables through the ported
+  // analytics; personal baselines recalibrate over the first days. On a DB-open
+  // failure we fall back to an EMPTY live repo (real-or-nothing: never the mock's
+  // fabricated numbers on device).
   Repository repo;
   try {
-    repo = await RealRepository.load();
+    repo = await LiveRepository.load(db, hrvWindow: Prefs.instance.hrvWindow);
   } catch (e, st) {
-    debugPrint('RealRepository.load failed, using MockRepository: $e\n$st');
-    repo = MockRepository();
+    debugPrint('LiveRepository.load failed, starting empty: $e\n$st');
+    repo = LiveRepository.empty();
   }
 
   // Build the root container ourselves so we can kick the guarded WHOOP auto-reconnect at startup
@@ -52,6 +55,13 @@ Future<void> main() async {
     ],
   );
   kickWhoopAutoConnect(container);
+
+  // Re-derive scores as new strap data lands: a debounced listen on the WHOOP
+  // biometric stream tables rebuilds the live repository and swaps it into
+  // repositoryProvider, so every day-driven surface grows as syncs complete
+  // (empty → first days → warmed baselines). Inert under `flutter test` — tests
+  // build their own ProviderScope and never call main().
+  _wireLiveReload(container, db);
 
   // Android background sync: once the remembered strap is reconnecting, start a low-key foreground
   // service that keeps the app PROCESS alive so this same main-isolate client keeps auto-reconnecting
@@ -74,6 +84,29 @@ Future<void> main() async {
     container: container,
     child: const NoopApp(),
   ));
+}
+
+/// Debounced live re-derivation: on any change to the WHOOP HR/RR/gravity stream
+/// tables, rebuild [LiveRepository] from the DB and push it into the container so
+/// dependent providers (days, vitals, …) refresh. Debounced because one offload
+/// writes many rows in bursts. Never cancelled — it lives for the app's lifetime.
+void _wireLiveReload(ProviderContainer container, AppDatabase db) {
+  Timer? debounce;
+  db.watchWhoopStreams().listen((_) {
+    debounce?.cancel();
+    debounce = Timer(const Duration(milliseconds: 600), () async {
+      try {
+        final fresh =
+            await LiveRepository.load(db, hrvWindow: Prefs.instance.hrvWindow);
+        container.updateOverrides([
+          repositoryProvider.overrideWithValue(fresh),
+          databaseProvider.overrideWithValue(db),
+        ]);
+      } catch (e, st) {
+        debugPrint('live reload failed: $e\n$st');
+      }
+    });
+  });
 }
 
 /// Hides the scrollbar on every scrollable (desktop shows one by default).

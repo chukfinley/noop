@@ -80,6 +80,22 @@ class MetricDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final days = ref.watch(daysProvider);
+    if (days.isEmpty) {
+      return ScreenScaffold(
+        title: switch (kind) {
+          MetricKind.recovery => 'Recovery',
+          MetricKind.strain => 'Strain',
+          MetricKind.sleep => 'Sleep',
+          MetricKind.stress => 'Stress',
+        },
+        children: const [
+          Padding(
+            padding: EdgeInsets.only(top: 72),
+            child: ConnectStrapView(),
+          ),
+        ],
+      );
+    }
     final maxI = days.length - 1;
     final idx = ref.watch(selectedDayIndexProvider).clamp(0, maxI);
     // The day the user is looking at — changeable in-screen with the same
