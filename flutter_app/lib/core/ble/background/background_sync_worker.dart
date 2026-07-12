@@ -71,6 +71,13 @@ const String kAppAliveHeartbeatCursor = 'app_alive_heartbeat_unix';
 /// missed beats without ever overlapping a live app.
 const Duration kHeartbeatStale = Duration(minutes: 3);
 
+/// How often the in-flight offload re-checks the app-alive heartbeat. The pre-flight check at the
+/// top of [runHeadlessWhoopSync] is one-shot; an offload runs for up to [kBgSyncMaxRuntime], so the
+/// guard MUST be re-evaluated continuously — otherwise a foreground launch (or a foreground-service
+/// revive) part-way through spins up a second BLE/DB owner. On the main isolate stamping a fresh
+/// beat immediately at launch (see the scheduler), this bounds the two-owner window to one interval.
+const Duration kHeartbeatRecheckInterval = Duration(seconds: 30);
+
 /// Hard cap on one headless run — a margin under WorkManager's ~10-min budget.
 const Duration kBgSyncMaxRuntime = Duration(minutes: 8);
 
@@ -143,18 +150,45 @@ Future<bool> runHeadlessWhoopSync() async {
   }
 }
 
-/// Whether the main app process is alive, judged by the freshness of the [kAppAliveHeartbeatCursor]
-/// it stamps into the shared drift KV. A read failure is treated as "not alive" (fail open → we do
-/// our job) — the worst case is a brief, sqlite-lock-serialised overlap, not corruption.
+/// Pure single-owner decision: given the app-alive heartbeat value just read from the shared drift
+/// KV ([beatUnix] in unix seconds, or `null` when the key is unset) and the current unix time
+/// [nowUnix], should the headless worker YIELD to the foreground — i.e. treat the app process as the
+/// live owner of BLE + the DB and NOT run its own offload?
+///
+/// This is the guard's whole truth table, kept side-effect-free so it can be unit-tested without a
+/// DB, a radio, or a clock. It is deliberately **fail-CLOSED**: on any ambiguity the worker yields,
+/// because two concurrent owners of one strap + one sqlite file is the outcome we must never risk,
+/// whereas a skipped run is harmless (WorkManager fires again next tick).
+///   • [readFailed] (the KV read threw / lock contention) → yield. A lost heartbeat lock is NOT
+///     evidence the app is dead; the previous "fail open → run anyway" was the bug (HIGH-4).
+///   • [beatUnix] == null (app has never stamped liveness) → do NOT yield: the app is genuinely dead
+///     / has never run, so the worker is the sole owner and should proceed.
+///   • a FUTURE beat (ageSec < 0: clock skew, DST, a beat from the future) → yield. We cannot prove
+///     staleness, so we assume the app is live.
+///   • a fresh beat (age < [kHeartbeatStale]) → yield; a stale beat → proceed.
+bool workerShouldYield({
+  required int? beatUnix,
+  required int nowUnix,
+  bool readFailed = false,
+}) {
+  if (readFailed) return true; // ambiguity → never risk a second owner
+  if (beatUnix == null) return false; // no heartbeat ever → app dead → safe to own BLE
+  final ageSec = nowUnix - beatUnix;
+  if (ageSec < 0) return true; // future/skewed beat → cannot prove stale → assume alive
+  return ageSec < kHeartbeatStale.inSeconds; // fresh → app owns BLE; stale → app dead
+}
+
+/// Whether the main app process is alive (owns BLE + the DB), judged by the freshness of the
+/// [kAppAliveHeartbeatCursor] it stamps into the shared drift KV. Thin DB wrapper around the pure
+/// [workerShouldYield] predicate. **Fail-CLOSED**: a read failure is treated as "alive/owned" so the
+/// worker yields rather than racing the foreground — the previous fail-open behaviour was HIGH-4.
 Future<bool> appIsAlive(AppDatabase db) async {
+  final nowUnix = DateTime.now().millisecondsSinceEpoch ~/ 1000;
   try {
     final beatUnix = await db.getSyncCursor(kAppAliveHeartbeatCursor);
-    if (beatUnix == null) return false;
-    final nowUnix = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final ageSec = nowUnix - beatUnix;
-    return ageSec >= 0 && ageSec < kHeartbeatStale.inSeconds;
+    return workerShouldYield(beatUnix: beatUnix, nowUnix: nowUnix);
   } catch (_) {
-    return false;
+    return workerShouldYield(beatUnix: null, nowUnix: nowUnix, readFailed: true);
   }
 }
 
@@ -179,6 +213,10 @@ Future<void> _runOneOffload(AppDatabase db, PairedStrap remembered) async {
   client.rememberedStrapLookup = () => remembered;
 
   final done = Completer<void>();
+  // Completes if the foreground process reclaims BLE part-way through (heartbeat goes fresh). This
+  // is the continuous, symmetric half of the single-owner guard: the foreground always wins, so the
+  // instant it is alive the worker abandons the offload and tears the link down.
+  final yielded = Completer<void>();
   String? lastPhase;
   final sub = client.syncProgress.listen((p) {
     final was = lastPhase;
@@ -195,16 +233,36 @@ Future<void> _runOneOffload(AppDatabase db, PairedStrap remembered) async {
     }
   });
 
+  // Continuous single-owner guard. The pre-flight [appIsAlive] check is one-shot; without this a
+  // foreground launch mid-offload would leave two BLE/DB owners for up to [kBgSyncMaxRuntime]. We
+  // re-poll the heartbeat every [kHeartbeatRecheckInterval] and, the moment the app is alive, fire
+  // [yielded] so the run unwinds into the clean teardown below. Crucially we only STOP WAITING — we
+  // never force-kill a write; the awaited disconnect/dispose (and the caller's db.close) drain any
+  // in-flight chunk, so the abort lands BETWEEN chunks and can never corrupt the trim/ack invariant
+  // (the strap is only told to trim after a chunk is durably persisted, so a mid-run abort at worst
+  // re-fetches the last chunk next tick — it never leaves a half-acked cursor).
+  final guard = Timer.periodic(kHeartbeatRecheckInterval, (_) async {
+    if (yielded.isCompleted || done.isCompleted) return;
+    if (await appIsAlive(db)) {
+      debugPrint('WorkManager WHOOP sync: app became alive mid-offload — yielding BLE to foreground');
+      if (!yielded.isCompleted) yielded.complete();
+    }
+  });
+
   try {
     // Fire the direct reconnect (no scan) → SET_CLOCK/GET_DATA_RANGE → single historical offload.
     await client.connectRemembered();
-    // Wait for the offload to complete, or give up at the runtime cap (connect could fail, or the
-    // strap is out of range / permissions were revoked — in all cases we tear down cleanly).
-    await done.future.timeout(kBgSyncMaxRuntime, onTimeout: () {});
+    // Unwind on the FIRST of: offload complete, foreground reclaimed BLE, or the runtime cap
+    // (connect could fail, or the strap is out of range / permissions were revoked). Every path
+    // lands in the clean teardown below.
+    await Future.any([done.future, yielded.future])
+        .timeout(kBgSyncMaxRuntime, onTimeout: () {});
   } finally {
+    guard.cancel();
     await sub.cancel();
     // Intentional teardown: drop the link (no auto-reconnect) and release every resource so the
-    // isolate can exit and WorkManager can reap it.
+    // isolate can exit and WorkManager can reap it. Awaited so any in-flight chunk drains before
+    // the caller closes the DB — the abort is between chunks, never mid-ack.
     await client.disconnect();
     await client.dispose();
   }

@@ -731,14 +731,33 @@ class AppDatabase extends _$AppDatabase {
           // a new lossless PPG-waveform table, three previously-dropped v18 fields as
           // nullable columns, and the rejected-frame archive's trim/family tags. No
           // existing column meaning changes; nothing is dropped or rewritten.
+          //
+          // IMPORTANT — idempotency across ALL prior versions: `createTable` above
+          // uses the LIVE (v3) generated table defs, which already carry the
+          // new-in-v3 columns (`hrSample.hrFixed88/onwrist`, `gravitySample.
+          // dynamicAccel`). So on the v1→v3 path the `from < 2` step already created
+          // those tables WITH those columns — re-`addColumn`ing them here would throw
+          // SQLite "duplicate column name" and roll the whole migration back (app
+          // bricked on upgrade). They must only be added for a DB whose whoop tables
+          // were built at v2 (WITHOUT them): guard those three on `from == 2`.
           if (from < 3) {
+            // New-in-v3 table: never created by the `from < 2` step, so create it on
+            // every pre-v3 path (v1→v3 and v2→v3).
             await m.createTable(whoopPpgRawSamples);
-            await m.addColumn(whoopHrSamples, whoopHrSamples.hrFixed88);
-            await m.addColumn(whoopHrSamples, whoopHrSamples.onwrist);
-            await m.addColumn(
-                whoopGravitySamples, whoopGravitySamples.dynamicAccel);
+            // `raw_sensor_archive` is created by onCreate at v1 (not re-created in
+            // the `from < 2` step) WITHOUT these, so add them on every pre-v3 path.
             await m.addColumn(rawSensorArchive, rawSensorArchive.trimCursor);
             await m.addColumn(rawSensorArchive, rawSensorArchive.family);
+            // These three live on tables the `from < 2` step (re)creates from the
+            // live v3 def — which already carries them. Only a v2 DB (whose whoop
+            // tables were built without them) needs the addColumn; adding on the
+            // v1→v3 path would duplicate. Hence `from == 2`, not `from < 3`.
+            if (from == 2) {
+              await m.addColumn(whoopHrSamples, whoopHrSamples.hrFixed88);
+              await m.addColumn(whoopHrSamples, whoopHrSamples.onwrist);
+              await m.addColumn(
+                  whoopGravitySamples, whoopGravitySamples.dynamicAccel);
+            }
           }
         },
         beforeOpen: (details) async {

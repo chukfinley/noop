@@ -50,6 +50,7 @@ class HrBroadcaster {
   PeripheralManager? _manager;
   GATTCharacteristic? _hrCharacteristic;
   StreamSubscription<GATTCharacteristicNotifyStateChangedEventArgs>? _notifyStateSub;
+  StreamSubscription<CentralConnectionStateChangedEventArgs>? _connectionStateSub;
 
   /// Centrals (gym kit / apps) currently subscribed to 0x2A37 notifications.
   final List<Central> _subscribers = <Central>[];
@@ -83,14 +84,29 @@ class HrBroadcaster {
       if (Platform.isAndroid && manager.state == BluetoothLowEnergyState.unauthorized) {
         await manager.authorize();
       }
-      if (manager.state != BluetoothLowEnergyState.poweredOn) {
-        _log('HR-out: Bluetooth not powered on (${manager.state}), cannot broadcast');
+      // `authorize()` returns only the grant bool and does NOT refresh the cached
+      // `manager.state` (it settles later via the async `onStateChanged`). Reading
+      // `manager.state` synchronously right after a first-time grant would still be the
+      // stale `unauthorized`/`unknown`, so the very first toggle-on would wrongly bail
+      // with 'not powered on'. Wait for the manager to settle on a real state first
+      // (Kotlin sidesteps this by reading the live `adapter.isEnabled`).
+      final state = await _resolvePoweredState(manager);
+      if (state != BluetoothLowEnergyState.poweredOn) {
+        _log('HR-out: Bluetooth not powered on ($state), cannot broadcast');
         _wantAdvertising = false;
         return;
       }
 
       _notifyStateSub ??=
           manager.characteristicNotifyStateChanged.listen(_onNotifyStateChanged);
+      // Prune subscribers on an abrupt central disconnect. `connectionStateChanged` is
+      // Android-only (it throws UnsupportedError elsewhere); on iOS CoreBluetooth reports
+      // the drop through the notify-state stream instead, so this guard matches Kotlin
+      // (whose GATT-server disconnect handler is likewise Android-only).
+      if (Platform.isAndroid) {
+        _connectionStateSub ??=
+            manager.connectionStateChanged.listen(_onConnectionStateChanged);
+      }
 
       // A mutable characteristic with the notify property; the plugin manages the CCCD
       // (0x2902) subscription handshake for us and surfaces it via
@@ -149,6 +165,35 @@ class HrBroadcaster {
     await stop();
     await _notifyStateSub?.cancel();
     _notifyStateSub = null;
+    await _connectionStateSub?.cancel();
+    _connectionStateSub = null;
+  }
+
+  /// Resolve the manager's *settled* Bluetooth state before deciding whether we can
+  /// advertise. If the cached [PeripheralManager.state] is already `poweredOn` we use it
+  /// as-is; otherwise (e.g. still `unauthorized`/`unknown` immediately after a first
+  /// `authorize()` grant) we await the next definitive [PeripheralManager.stateChanged]
+  /// event, capped by [timeout] so a device that never powers on can't hang `start()`.
+  Future<BluetoothLowEnergyState> _resolvePoweredState(
+    PeripheralManager manager, {
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    if (manager.state == BluetoothLowEnergyState.poweredOn) return manager.state;
+    try {
+      await manager.stateChanged
+          .map((e) => e.state)
+          .firstWhere(
+            (s) =>
+                s == BluetoothLowEnergyState.poweredOn ||
+                s == BluetoothLowEnergyState.poweredOff ||
+                s == BluetoothLowEnergyState.unsupported,
+          )
+          .timeout(timeout);
+    } catch (_) {
+      // Timeout or the stream closing without a settled state — fall through and let the
+      // caller judge whatever `manager.state` reads now.
+    }
+    return manager.state;
   }
 
   /// Feed a live HR sample (bpm) to broadcast. null (no current reading) sends nothing —
@@ -166,16 +211,47 @@ class HrBroadcaster {
     if (args.characteristic.uuid != _heartRateChar) return;
     final central = args.central;
     if (args.state) {
-      if (!_subscribers.contains(central)) {
-        _subscribers.add(central);
+      if (addSubscriber(_subscribers, central)) {
         _log('HR-out: a central subscribed (now ${_subscribers.length})');
       }
       // Push the latest reading at once so a freshly subscribed machine shows a value.
       final bpm = _lastBpm;
       if (bpm != null) unawaited(_notifyOne(central, bpm));
     } else {
-      _subscribers.remove(central);
+      pruneSubscriber(_subscribers, central);
     }
+  }
+
+  /// A central's connection state changed. On an abrupt disconnect (treadmill powered
+  /// off, user walks out of range) the central never writes CCCD=0, so without this it
+  /// would linger in [_subscribers] forever — the set grows unbounded and every
+  /// [update] fans out a doomed notify to a dead central. Prune it here to keep the set
+  /// (and the subscriber count) honest. Faithful port of the Kotlin
+  /// `gattServerCallback.onConnectionStateChange` `STATE_DISCONNECTED` handler.
+  void _onConnectionStateChanged(CentralConnectionStateChangedEventArgs args) {
+    if (args.state != ConnectionState.disconnected) return;
+    if (pruneSubscriber(_subscribers, args.central)) {
+      _log('HR-out: a central disconnected (now ${_subscribers.length})');
+    }
+  }
+
+  /// Add [central] to [subscribers] if not already present, matched by [Central.uuid]
+  /// (not object identity — the plugin may hand back a fresh [Central] instance per
+  /// event for the same peer). Returns true if it was newly added. Pure: no radio,
+  /// unit-testable away from a [PeripheralManager].
+  static bool addSubscriber(List<Central> subscribers, Central central) {
+    if (subscribers.any((c) => c.uuid == central.uuid)) return false;
+    subscribers.add(central);
+    return true;
+  }
+
+  /// Remove every entry in [subscribers] whose [Central.uuid] matches [central]. Returns
+  /// true if anything was removed. Pure: no radio, unit-testable away from a
+  /// [PeripheralManager].
+  static bool pruneSubscriber(List<Central> subscribers, Central central) {
+    final before = subscribers.length;
+    subscribers.removeWhere((c) => c.uuid == central.uuid);
+    return subscribers.length != before;
   }
 
   /// Send a 0x2A37 measurement to every subscribed central.

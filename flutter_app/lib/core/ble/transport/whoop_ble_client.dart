@@ -355,6 +355,29 @@ class WhoopBleClient {
   /// Last human-readable error surfaced (permissions denied, adapter off, not found, …). null = none.
   String? lastError;
 
+  // ── test seams (radio-free state-machine exercising; never used at runtime) ──────────────────
+  // These drive the client's REAL transitions from a REACHABLE state so the lifecycle fixes (#982
+  // scan give-up, #HIGH-3 half-open teardown, #LOW-1 backoff reset) can be pinned by unit tests that
+  // touch no radio (the project rule forbids launching). They fabricate no device data — they only
+  // place the state machine where a scan / GATT callback would, then invoke the same code path.
+  @visibleForTesting
+  void debugSetState(BleConnectionState s) => _setState(s);
+
+  @visibleForTesting
+  void debugScanGiveUp() => _onScanGiveUp();
+
+  @visibleForTesting
+  Future<void> debugAbortBringUp(String error) => _abortBringUp(error);
+
+  @visibleForTesting
+  void debugResetForUserAction() => _resetBondStateForUserAction();
+
+  @visibleForTesting
+  int get debugReconnectAttempt => _reconnectAttempt;
+
+  @visibleForTesting
+  set debugReconnectAttempt(int v) => _reconnectAttempt = v;
+
   // ── bond hardening (Android bonding stack, ported from the Kotlin WhoopBleClient) ───────────
   /// Minimum time since the bond-loop pause tripped (or since the last probe) before another salvage
   /// probe may fire (#78 hole-4). 10 minutes: long enough that a still-held strap sees a handful of
@@ -422,6 +445,10 @@ class WhoopBleClient {
   int? _bondLoopPausedAtMs;
 
   Timer? _scanFallbackTimer;
+  /// #982 scan give-up: bounds every scan so a scan that never sees a matching strap can't wedge the
+  /// client in `scanning` forever. On elapse (no match, not connected) [_onScanGiveUp] stops the scan,
+  /// sets [lastError], and returns to a RETRYABLE idle. Twin of the Kotlin `scanTimeoutRunnable`.
+  Timer? _scanGiveUpTimer;
   Timer? _liveFlushTimer;
   Timer? _offloadKickTimer;
   Timer? _reconnectTimer;
@@ -666,6 +693,7 @@ class WhoopBleClient {
 
     // Stop any auto-pick scan already in flight, then connect straight to the chosen device+family.
     _scanFallbackTimer?.cancel();
+    _scanGiveUpTimer?.cancel();
     await _scanSub?.cancel();
     _scanSub = null;
     try {
@@ -706,6 +734,9 @@ class WhoopBleClient {
     }
     _intentionalDisconnect = false;
     lastError = null;
+    // #LOW-1: reset the reconnect-backoff ramp so this user-initiated (re)connect starts fresh. Unlike
+    // [_resetBondStateForUserAction] we do NOT lift the bond-loop pause here (this path honours it above).
+    _reconnectAttempt = 0;
 
     final granted = await ensureBlePermissions();
     if (!granted) {
@@ -771,14 +802,18 @@ class WhoopBleClient {
   }
 
   /// A user-initiated connect/disconnect re-arms the whole bond hardening stack: clears the refusal /
-  /// watchdog / loop streaks and lifts any latched auto-reconnect pause, so a fresh tap always retries
-  /// the bond from a clean slate (mirrors the Kotlin `clearPairingHint`).
+  /// watchdog / loop streaks, lifts any latched auto-reconnect pause, and resets the reconnect-backoff
+  /// counter — so a fresh tap always retries the bond AND the reconnect ramp from a clean slate
+  /// (mirrors the Kotlin `clearPairingHint` + `resetReconnectBackoff`). Without the backoff reset (#LOW-1)
+  /// a manual Connect after prior involuntary drops would start the next drop's wait at the capped-max
+  /// delay instead of restarting the ramp.
   void _resetBondStateForUserAction() {
     _bondWatchdog.reset();
     _bondGiveUp.reset();
     _postBondLoop.reset();
     _autoReconnectPausedForBondLoop = false;
     _bondLoopPausedAtMs = null;
+    _reconnectAttempt = 0;
   }
 
   // ============================================================================================
@@ -915,6 +950,7 @@ class WhoopBleClient {
     _family = family;
     _setState(BleConnectionState.scanning);
     _scanFallbackTimer?.cancel();
+    _scanGiveUpTimer?.cancel();
     _scanSub?.cancel();
 
     final serviceGuid = Guid(family.serviceUuidString);
@@ -926,6 +962,7 @@ class WhoopBleClient {
       _scanSub?.cancel();
       _scanSub = null;
       _scanFallbackTimer?.cancel();
+      _scanGiveUpTimer?.cancel();
       _pairedName = _nameOfResult(r, family);
       _log('Strap found: ${_pairedName!} (${family.name}) — connecting');
       unawaited(FlutterBluePlus.stopScan());
@@ -952,6 +989,10 @@ class WhoopBleClient {
         timeout: scanTimeout,
       ));
       _log('Scan: looking for a ${family.name} strap (${family.serviceUuidString})');
+      // Bound this scan so a no-match never wedges us in `scanning` (#982). Re-armed per family, so a
+      // fallback rotation resets the window; a match/connect cancels it above.
+      _scanGiveUpTimer?.cancel();
+      _scanGiveUpTimer = Timer(scanTimeout, _onScanGiveUp);
     } catch (e) {
       lastError = 'Scan failed to start: $e';
       _log(lastError!);
@@ -962,6 +1003,29 @@ class WhoopBleClient {
   static DeviceFamily _fallbackFamily(DeviceFamily f) =>
       f == DeviceFamily.whoop4 ? DeviceFamily.whoop5 : DeviceFamily.whoop4;
 
+  /// The scan give-up (#982 / MASTER-BACKLOG HIGH-2): a scan that never sees a matching strap (strap on
+  /// its charger, held by the official app, or out of range) used to leave the client stuck in
+  /// `scanning` forever — `connect()`/`connectRemembered()` then early-return on the scanning guard, so
+  /// Connect was permanently dead until an app restart. Every [_startScan]/[_startUniversalScan] arms
+  /// [_scanGiveUpTimer] for [scanTimeout]; on elapse (still scanning, nothing found) we stop the scan,
+  /// set a clear [lastError], and drop back to a RETRYABLE idle. Twin of the Kotlin `scanTimeoutRunnable`.
+  /// Guarded so a match/connect/teardown that already left `scanning` makes this a no-op.
+  void _onScanGiveUp() {
+    if (_connected || _state != BleConnectionState.scanning) return;
+    _scanFallbackTimer?.cancel();
+    _scanGiveUpTimer?.cancel();
+    _scanSub?.cancel();
+    _scanSub = null;
+    if (_blePlatform) {
+      try {
+        unawaited(FlutterBluePlus.stopScan());
+      } catch (_) {}
+    }
+    lastError = 'No WHOOP strap found';
+    _log('Scan timed out — no WHOOP strap found; giving up (state → idle, retryable)');
+    _setState(BleConnectionState.idle);
+  }
+
   /// Universal auto-detect scan: filter on BOTH families' service UUIDs at once and connect to the
   /// first WHOOP that advertises, adopting its family from the advertised service UUID (Kotlin
   /// `fallbackScanModel`). Used by [connect] when the caller passes no family and nothing is
@@ -970,6 +1034,7 @@ class WhoopBleClient {
     if (!_blePlatform) return;
     _setState(BleConnectionState.scanning);
     _scanFallbackTimer?.cancel();
+    _scanGiveUpTimer?.cancel();
     _scanSub?.cancel();
 
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
@@ -978,6 +1043,7 @@ class WhoopBleClient {
         if (fam == null) continue;
         _scanSub?.cancel();
         _scanSub = null;
+        _scanGiveUpTimer?.cancel();
         _family = fam;
         _pairedName = _nameOfResult(r, fam);
         _log('Strap found: ${_pairedName!} (${fam.name}) — connecting');
@@ -998,6 +1064,9 @@ class WhoopBleClient {
         timeout: scanTimeout,
       ));
       _log('Scan: universal (both WHOOP families) — auto-detecting the model');
+      // Bound the universal scan too (#982): no WHOOP of either family → give up to a retryable idle.
+      _scanGiveUpTimer?.cancel();
+      _scanGiveUpTimer = Timer(scanTimeout, _onScanGiveUp);
     } catch (e) {
       lastError = 'Scan failed to start: $e';
       _log(lastError!);
@@ -1057,7 +1126,10 @@ class WhoopBleClient {
     try {
       services = await device.discoverServices();
     } catch (e) {
-      _log('discoverServices failed: $e');
+      // #HIGH-3: discovery threw → we hold a live-but-useless GATT link with _state stuck at
+      // `connecting`. Tear the link down and drop to a retryable idle (mirrors the _ensureBonded==false
+      // path) instead of wedging so Connect can be retried.
+      await _abortBringUp('Service discovery failed: $e');
       return;
     }
     _log('Services discovered (${services.length})');
@@ -1075,8 +1147,10 @@ class WhoopBleClient {
       }
     }
     if (custom == null) {
+      // #HIGH-3: the custom WHOOP service isn't present → same half-open-link wedge as a discovery
+      // throw. Tear down and go retryable-idle rather than sitting in `connecting` forever.
       _log('Custom WHOOP service not found on this peripheral');
-      lastError = 'Not a WHOOP strap (service not found).';
+      await _abortBringUp('Not a WHOOP strap (service not found).');
       return;
     }
 
@@ -1100,11 +1174,8 @@ class WhoopBleClient {
     if (!bonded) {
       // Drop the wedged link. If the bond give-up / loop detector latched the pause, [_onDisconnected]
       // skips the reconnect; otherwise it backoff-reconnects and retries with a wider bond window.
-      if (_blePlatform) {
-        try {
-          await device.disconnect();
-        } catch (_) {}
-      }
+      // No lastError/idle here on purpose: the bond stack owns the paused hint + state on a give-up.
+      await _disconnectDevice(device);
       return;
     }
 
@@ -1139,6 +1210,30 @@ class WhoopBleClient {
     }
     _log('Strap alarm: reconciling the enabled alarm on connect');
     unawaited(setStrapAlarm(wake, enabled: true));
+  }
+
+  /// Best-effort GATT teardown of a single device (Android/iOS only; a no-op off-device and in tests).
+  /// The subsequent `disconnected` state event fires [_onDisconnected], which owns the state reset and
+  /// the backoff reconnect. Swallows any disconnect error — we're already on a failure path.
+  Future<void> _disconnectDevice(BluetoothDevice device) async {
+    if (!_blePlatform) return;
+    try {
+      await device.disconnect();
+    } catch (_) {}
+  }
+
+  /// Abort a post-connect bring-up that can't proceed (discovery threw or the custom WHOOP service is
+  /// missing — MASTER-BACKLOG HIGH-3). Surfaces [error], tears down the half-open GATT link, and — so
+  /// the client never stays wedged in `connecting` with a live-but-useless link — drops immediately to
+  /// a RETRYABLE idle. On-device the disconnect also drives [_onDisconnected] (backoff reconnect);
+  /// off-device (tests) the explicit idle transition is the observable recovery. Uses the current
+  /// [_device] so it needs no argument and stays trivially exercisable without a radio.
+  Future<void> _abortBringUp(String error) async {
+    lastError = error;
+    _log('Bring-up aborted ($error) — tearing down the half-open link (state → idle, retryable)');
+    final device = _device;
+    if (device != null) await _disconnectDevice(device);
+    if (_state == BleConnectionState.connecting) _setState(BleConnectionState.idle);
   }
 
   // ============================================================================================
@@ -1720,6 +1815,7 @@ class WhoopBleClient {
 
   void _cancelTimers() {
     _scanFallbackTimer?.cancel();
+    _scanGiveUpTimer?.cancel();
     _liveFlushTimer?.cancel();
     _offloadKickTimer?.cancel();
     _reconnectTimer?.cancel();
