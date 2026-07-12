@@ -1,4 +1,71 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      Live WHOOP strap link (BLE) + optional network. Mirrors the native Android app's
+      bluetooth/location/foreground-service/network permission set for the same strap.
+      Permissions only here — the BLE logic is requested at runtime (see
+      lib/core/ble/permissions.dart). No service component is declared because the
+      Flutter app has no such code yet.
+    -->
+
+    <!-- Outbound network: opt-in AI Coach (bring-your-own key) + connectivity checks. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Android 12+ (API 31+) Bluetooth runtime permissions.
+         neverForLocation: we only read HR/battery from the strap and never derive
+         physical location from BLE scans, so we opt out of the location requirement. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_CONNECT"
+        tools:targetApi="s" />
+    <!-- Optional: broadcast live HR back out as a standard BLE Heart Rate peripheral. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADVERTISE"
+        tools:targetApi="s" />
+
+    <!-- Android 8-11 (API 26-30): legacy Bluetooth perms are install-time. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+
+    <!-- Pre-12 (API <=30) only: BLE scans required a location permission. On API 31+ the
+         neverForLocation flag above removes that requirement, so this is capped at 30. -->
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+
+    <!-- Keep the BLE link alive while collecting/offloading in the background. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"
+        tools:targetApi="34" />
+
+    <!-- Android 13+ (API 33+): show the low-key persistent "WHOOP sync" foreground-service
+         notification. Requested at runtime; the service still runs if the user declines. -->
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS"
+        tools:targetApi="33" />
+
+    <!-- BLE is used but not mandatory hardware (app also runs on desktop). -->
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="false" />
+
+    <!-- Accelerometer drives the gravity-levelling "water" gauges. No runtime
+         permission is needed for the accelerometer; declared non-required so the
+         app still installs on devices without one (desktop). -->
+    <uses-feature
+        android:name="android.hardware.sensor.accelerometer"
+        android:required="false" />
+
     <application
         android:label="noop"
         android:name="${applicationName}"
@@ -25,6 +92,17 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- flutter_foreground_task's persistent foreground service. The class name is fixed by
+             the plugin (do not rename). connectedDevice type = we hold an active BLE link to the
+             WHOOP strap; reuses the already-declared FOREGROUND_SERVICE(+_CONNECTED_DEVICE) perms.
+             stopWithTask=true so the service also ends if the user swipes the app away (we do not
+             claim reliable killed-app sync — see BackgroundSyncService docs). -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="connectedDevice"
+            android:stopWithTask="true"
+            android:exported="false" />
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

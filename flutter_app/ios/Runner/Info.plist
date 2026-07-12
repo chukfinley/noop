@@ -2,6 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Noop connects to your WHOOP strap over Bluetooth to read heart rate, HRV and battery. Nothing is uploaded — everything stays on your device.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Noop uses Bluetooth to connect to your WHOOP strap and read its sensor data locally on your device.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>

@@ -1,8 +1,15 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:noop/core/data/db/database.dart';
+import 'package:noop/core/data/nutrition/off_client.dart';
+import 'package:noop/core/ble/background/background_sync_service.dart';
+import 'package:noop/core/ble/transport/whoop_providers.dart';
 import 'package:noop/core/data/real_repository.dart';
 import 'package:noop/core/data/repository.dart';
+import 'package:noop/core/state/log_store.dart';
 import 'package:noop/core/state/prefs.dart';
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/features/shell/presentation/app_shell.dart';
@@ -15,6 +22,14 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Prefs.instance.load();
 
+  // Open Food Facts requires a real User-Agent before any lookup.
+  OffClient.init(appName: 'NOOP', appUrl: 'https://github.com/ryanbr/noop');
+
+  // Open the local store and load the user logs into memory (importing any
+  // legacy secure-storage logs into the DB on first run).
+  final db = AppDatabase();
+  await LogStore.instance.loadFrom(db);
+
   // Score the real bundled Whoop capture through the ported analytics; fall
   // back to the deterministic mock only if the asset can't be read.
   Repository repo;
@@ -25,8 +40,27 @@ Future<void> main() async {
     repo = MockRepository();
   }
 
-  runApp(ProviderScope(
-    overrides: [repositoryProvider.overrideWithValue(repo)],
+  // Build the root container ourselves so we can kick the guarded WHOOP auto-reconnect at startup
+  // (a remembered strap reconnects + offloads with no user action). The kick is a strict no-op off
+  // Android/iOS and when nothing is remembered — and because tests build their OWN ProviderScope and
+  // never call main(), a plain `flutter test` never triggers it.
+  final container = ProviderContainer(
+    overrides: [
+      repositoryProvider.overrideWithValue(repo),
+      databaseProvider.overrideWithValue(db),
+    ],
+  );
+  kickWhoopAutoConnect(container);
+
+  // Android background sync: once the remembered strap is reconnecting, start a low-key foreground
+  // service that keeps the app PROCESS alive so this same main-isolate client keeps auto-reconnecting
+  // + offloading while the app is backgrounded. Strict no-op off Android (desktop/web/iOS), when no
+  // strap is remembered, or when disabled — and tests never call main(), so it never runs under
+  // `flutter test`.
+  unawaited(maybeStartBackgroundSync(container));
+
+  runApp(UncontrolledProviderScope(
+    container: container,
     child: const NoopApp(),
   ));
 }

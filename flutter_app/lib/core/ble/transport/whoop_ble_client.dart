@@ -1,0 +1,1513 @@
+/// WHOOP BLE transport (Wave D2a) — the device-facing half of the strap sync.
+///
+/// A `flutter_blue_plus` engine that mirrors the happy path of the Android Kotlin
+/// `WhoopBleClient.kt` (5299 LOC) reference, wiring the already-ported, already-tested
+/// decode layer (`../protocol/`) and sync layer (`../sync/`) into a working strap SYNC.
+///
+/// This half CANNOT be unit-tested without hardware (the project rule forbids launching the
+/// app), so its correctness comes from faithfully mirroring the Kotlin connection sequence.
+/// Everything degrades safely OFF device: every `flutter_blue_plus` call is guarded behind
+/// [_blePlatform] (`Platform.isAndroid || Platform.isIOS`), and the client is inert until an
+/// explicit [connect] — construction touches no radio, so a plain `flutter test` never scans.
+///
+/// The connect sequence (mirrors the Kotlin 6-step flow):
+///   1. [connect] — `ensureBlePermissions()`, then a service-filtered scan for the chosen
+///      family's service UUID, with a [fallbackScanModel] rotation after [scanFallbackDelay].
+///   2. take the first matching [ScanResult], stop the scan, and `connect()` to the device.
+///   3. on `BluetoothConnectionState.connected` → `discoverServices()`.
+///   4. locate the custom WHOOP4/WHOOP5 service → capture the cmd-write char + enable
+///      notifications (write the CCCD via `setNotifyValue`) on the family's notify chars, plus
+///      the standard HR (0x2A37) and battery (0x2A19) chars. For WHOOP5: write CLIENT_HELLO,
+///      subscribe the puffin notify chars, then send the [Whoop5Config.enableR22Sequence].
+///   5. the connect-time command sequence, in Kotlin order: SET_CLOCK → GET_DATA_RANGE →
+///      (deferred by [initialBackfillDelay]) trigger the historical offload.
+///   6. inbound routing (mirrors `onCharacteristicChanged`): DATA/CMD/EVENT notify bytes →
+///      [Reassembler] → [Framing.parseFrame]; live REALTIME_DATA → [extractStreams] → persist
+///      via [StreamPersistence] + publish live HR; HISTORICAL_DATA offload frames →
+///      [Backfiller.ingest] (persist to drift); COMMAND_RESPONSE GET_DATA_RANGE → session gates.
+///   • reconnect on an involuntary drop using [ReconnectBackoff.nextDelayMs].
+library;
+
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+
+import '../permissions.dart';
+import '../protocol/device_family.dart';
+import '../protocol/enums.dart';
+import '../protocol/framing.dart';
+import '../protocol/historical_streams.dart';
+import '../protocol/parsed_frame.dart';
+import '../protocol/streams.dart';
+import '../protocol/whoop5_config.dart';
+import '../sync/backfiller.dart';
+import '../sync/raw_archive.dart';
+import '../sync/reconnect_backoff.dart';
+import '../sync/stream_persistence.dart';
+
+/// High-level link state surfaced to the UI (mirrors the Kotlin `LiveState` phases we expose).
+enum BleConnectionState { idle, scanning, connecting, connected, syncing }
+
+/// A snapshot of historical-offload progress: how many packets have landed, how far through the
+/// strap's banked-record span the offload has advanced, and which day is being decoded right now —
+/// enough for the UI to show "syncing &lt;date&gt;", a percent bar, and a packet counter.
+class SyncProgress {
+  const SyncProgress({
+    required this.recordsPersisted,
+    required this.phase,
+    this.percent,
+    this.currentTsMs,
+    this.oldestTsMs,
+    this.newestTsMs,
+  });
+
+  /// Total biometric rows (packets) persisted this offload session (from
+  /// [Backfiller.sessionRowsPersisted]) — the "how many packets" number.
+  final int recordsPersisted;
+
+  /// Coarse phase: "idle", "offloading", "complete".
+  final String phase;
+
+  /// 0..1 offload progress through the strap's `[oldest, newest]` banked-record span, derived from
+  /// how far [currentTsMs] has advanced past [oldestTsMs]. Null when the range isn't known yet
+  /// (pre-GET_DATA_RANGE) or we aren't offloading.
+  final double? percent;
+
+  /// Unix milliseconds of the most-recent record decoded/persisted in the offload, so the UI can
+  /// render "syncing &lt;date&gt;". Null before any offload record has landed.
+  final int? currentTsMs;
+
+  /// GET_DATA_RANGE lower bound (unix ms) — the oldest banked record on the strap. Null pre-range.
+  final int? oldestTsMs;
+
+  /// GET_DATA_RANGE upper bound (unix ms) — the newest banked record on the strap. Null pre-range.
+  final int? newestTsMs;
+
+  @override
+  String toString() =>
+      'SyncProgress(recordsPersisted: $recordsPersisted, phase: $phase, '
+      'percent: $percent, currentTsMs: $currentTsMs, oldestTsMs: $oldestTsMs, '
+      'newestTsMs: $newestTsMs)';
+}
+
+/// A WHOOP strap surfaced by [WhoopBleClient.discoverStraps] so the UI can show a picker instead of
+/// auto-connecting to the first advertiser. [id] is the platform remote-id (feed it back to
+/// [WhoopBleClient.connectToStrap] via the same [DiscoveredStrap]).
+class DiscoveredStrap {
+  const DiscoveredStrap({
+    required this.id,
+    required this.name,
+    required this.rssi,
+    required this.family,
+  });
+
+  /// Stable platform remote-id (BLE MAC on Android, a system UUID on iOS).
+  final String id;
+
+  /// Advertised device name, or a family-derived fallback when the advert carries none.
+  final String name;
+
+  /// Last-seen signal strength (dBm; closer to 0 is stronger).
+  final int rssi;
+
+  /// Which WHOOP family advertised this service UUID (drives the bring-up branch on connect).
+  final DeviceFamily family;
+
+  @override
+  String toString() =>
+      'DiscoveredStrap(id: $id, name: $name, rssi: $rssi, family: ${family.name})';
+}
+
+/// An immutable handle to a paired WHOOP strap — the real platform remote-id, the resolved
+/// [DeviceFamily], and the advertised name (may be null). Emitted by [WhoopBleClient.connectedStrap]
+/// on a successful connect so the provider layer can persist it, and reconstructed from [Prefs] to
+/// drive [WhoopBleClient.connectRemembered]. [familyToken]/[familyFromToken] convert the family to and
+/// from the `"whoop4"`/`"whoop5"` string persisted in secure storage.
+class PairedStrap {
+  const PairedStrap({required this.id, required this.family, this.name});
+
+  /// Stable platform remote-id (BLE MAC on Android, a system UUID on iOS) — feed back to
+  /// [BluetoothDevice.fromId] to reconnect directly, no scan.
+  final String id;
+
+  /// Which WHOOP family this strap belongs to (drives the bring-up branch on reconnect).
+  final DeviceFamily family;
+
+  /// Advertised device name, or null when the advert carried none.
+  final String? name;
+
+  /// The persisted family token (`"whoop4"`/`"whoop5"`).
+  String get familyToken => familyToToken(family);
+
+  /// Parse the persisted family token back to a [DeviceFamily]; unknown/null → WHOOP 4.0.
+  static DeviceFamily familyFromToken(String? token) =>
+      token == 'whoop5' ? DeviceFamily.whoop5 : DeviceFamily.whoop4;
+
+  /// The persisted token for a [DeviceFamily] (`"whoop4"`/`"whoop5"`).
+  static String familyToToken(DeviceFamily f) =>
+      f == DeviceFamily.whoop5 ? 'whoop5' : 'whoop4';
+
+  @override
+  String toString() => 'PairedStrap(id: $id, family: ${family.name}, name: $name)';
+}
+
+/// One timestamped line of the connection log — the rolling in-memory trace the device screen
+/// renders so the user can watch, on real hardware, whether the link drops / reconnects / actually
+/// syncs. [ts] is captured at log time (device runtime only — never on a pure/test path, since the
+/// client is inert until an explicit connect).
+class ConnLogEntry {
+  const ConnLogEntry(this.ts, this.message);
+
+  /// Wall-clock time the line was logged.
+  final DateTime ts;
+
+  /// The human-readable log line (the same text that goes to `debugPrint`).
+  final String message;
+
+  @override
+  String toString() => 'ConnLogEntry($ts, $message)';
+}
+
+/// The default device id every persisted row is stamped with (matches the Kotlin `DEFAULT_DEVICE_ID`).
+const String kDefaultWhoopDeviceId = 'my-whoop';
+
+/// Whether the current platform has a BLE stack `flutter_blue_plus` can drive. On desktop/web/tests
+/// every radio call is a no-op so the app (which also runs on Linux) never crashes. Mirrors the
+/// `permissions._blePlatform` guard so the whole transport is inert off-device.
+bool get _blePlatform {
+  if (kIsWeb) return false;
+  return Platform.isAndroid || Platform.isIOS;
+}
+
+/// `flutter_blue_plus`-backed WHOOP transport. Construct once (pure — no radio access) and drive it
+/// with [connect] / [disconnect]. All state is published on broadcast streams so Riverpod providers
+/// can surface it without the client depending on Riverpod.
+class WhoopBleClient {
+  WhoopBleClient({
+    required BackfillRepository streamRepository,
+    required TrimCursorStore cursorStore,
+    RejectedFrameArchive? rejectedArchive,
+    this.deviceId = kDefaultWhoopDeviceId,
+  }) : _streamRepository = streamRepository {
+    // Wire the rejected-frame archive so CRC-ok-but-undecodable HISTORICAL frames are
+    // persisted DURABLY before the trim is acked (#77 / #91) — otherwise the strap
+    // trims them and the bytes are lost forever. Prefer an explicit archive (tests);
+    // else derive one from the drift-backed repository so the production provider wiring
+    // needs no change. When neither is available (a non-drift repo) the sink allows the
+    // ack (legacy behaviour) rather than stalling the offload.
+    final archive = rejectedArchive ??
+        (streamRepository is DriftStreamRepository
+            ? streamRepository.rejectedArchive
+            : null);
+    final RejectedSink rejectedSink = archive != null
+        ? (frames, trim, family) => archive.append(frames, trim, family)
+        : (frames, trim, family) async => true;
+    _backfiller = Backfiller(
+      repository: streamRepository,
+      deviceId: deviceId,
+      cursorStore: cursorStore,
+      ackTrim: _ackTrim,
+      onChunkCommitted: _onChunkCommitted,
+      log: _log,
+      rejectedSink: rejectedSink,
+    );
+  }
+
+  // ── tunables (mirror the Kotlin companion constants) ──────────────────────────────────────
+  /// No matching strap this long → rotate the scan to the other WHOOP family (Kotlin SCAN_FALLBACK).
+  static const Duration scanFallbackDelay = Duration(seconds: 6);
+
+  /// Overall scan give-up window per family before we surface "not found".
+  static const Duration scanTimeout = Duration(seconds: 15);
+
+  /// Deferral before the first connect-time offload, so SET_CLOCK/GET_DATA_RANGE round-trip first
+  /// on a settled link (Kotlin INITIAL_BACKFILL_DELAY_MS).
+  static const Duration initialBackfillDelay = Duration(milliseconds: 1500);
+
+  /// Spacing between the 15 SET_CONFIG R22 enable writes (Kotlin uses ~80ms).
+  static const Duration r22FlagSpacing = Duration(milliseconds: 80);
+
+  /// Flush the live-frame buffer at least this often (Kotlin FLUSH_MAX_INTERVAL_MS ≈ 5s).
+  static const Duration liveFlushInterval = Duration(seconds: 5);
+
+  /// Flush the live-frame buffer once it holds this many frames (Kotlin FLUSH_MAX_FRAMES).
+  static const int liveFlushMaxFrames = 40;
+
+  /// Plausible unix-seconds window for a banked-record timestamp (Kotlin GET_DATA_RANGE scan window).
+  static const int _unixFloor = 1700000000;
+  static const int _unixCeil = 1900000000;
+
+  final String deviceId;
+  final BackfillRepository _streamRepository;
+  late final Backfiller _backfiller;
+
+  // ── published broadcast streams ───────────────────────────────────────────────────────────
+  final _connController = StreamController<BleConnectionState>.broadcast();
+  final _hrController = StreamController<int?>.broadcast();
+  final _batteryController = StreamController<double?>.broadcast();
+  final _chargingController = StreamController<bool?>.broadcast();
+  final _syncController = StreamController<SyncProgress>.broadcast();
+  final _pairedController = StreamController<PairedStrap?>.broadcast();
+  final _logController = StreamController<List<ConnLogEntry>>.broadcast();
+
+  // ── connection log (rolling in-memory trace of every _log line) ─────────────────────────────
+  /// Newest-last rolling buffer, capped at [_maxLogEntries]. Stays empty until the first [_log]
+  /// (i.e. until an explicit connect), so a fresh client — and a plain `flutter test` — logs nothing.
+  final List<ConnLogEntry> _logBuffer = [];
+  static const int _maxLogEntries = 100;
+
+  /// Optional lookup for the last-paired strap, injected by the provider layer (which reads [Prefs]).
+  /// Consulted by [connect] (to resolve a null family from the remembered family) and by
+  /// [connectRemembered] (to reconnect directly to the remembered device). Kept as a callback so the
+  /// transport stays Prefs/Riverpod-free; null (the default) means "nothing remembered".
+  PairedStrap? Function()? rememberedStrapLookup;
+
+  /// Live link state (idle/scanning/connecting/connected/syncing).
+  Stream<BleConnectionState> get connectionState => _connController.stream;
+
+  /// Live heart rate (bpm) or null when unknown. Sourced from the standard 0x2A37 profile and from
+  /// REALTIME_DATA frames on the custom channel.
+  Stream<int?> get liveHr => _hrController.stream;
+
+  /// Strap battery as a 0..1 fraction, or null when unknown.
+  Stream<double?> get battery => _batteryController.stream;
+
+  /// Whether the strap is charging: true/false when a battery frame reported it (WHOOP4
+  /// GET_BATTERY_LEVEL response), null when unknown (the standard 0x2A19 profile has no charging
+  /// bit). Additive to [battery] — the fraction stays a separate signal.
+  Stream<bool?> get charging => _chargingController.stream;
+
+  /// Historical-offload progress.
+  Stream<SyncProgress> get syncProgress => _syncController.stream;
+
+  /// The strap we are paired to: emits a [PairedStrap] the moment a connect succeeds (the real
+  /// device id + resolved family + name are known), and null on disconnect. The provider layer
+  /// persists the non-null emissions to [Prefs] so a later launch can auto-reconnect.
+  Stream<PairedStrap?> get connectedStrap => _pairedController.stream;
+
+  /// The rolling connection log — emits the full (newest-last) buffer on every new [_log] line, so
+  /// the UI can render a live trace of scan/connect/offload/disconnect events. Broadcast, and inert
+  /// until the first log (so subscribing off-device / in tests yields nothing).
+  Stream<List<ConnLogEntry>> get connectionLog => _logController.stream;
+
+  /// The current connection-log buffer (newest-last), for a synchronous read of what's landed so far.
+  List<ConnLogEntry> get connectionLogNow => List.unmodifiable(_logBuffer);
+
+  BleConnectionState _state = BleConnectionState.idle;
+  BleConnectionState get state => _state;
+
+  /// Last human-readable error surfaced (permissions denied, adapter off, not found, …). null = none.
+  String? lastError;
+
+  int? _hrNow;
+  double? _batteryNow;
+  bool? _chargingNow;
+  int? get liveHrNow => _hrNow;
+  double? get batteryNow => _batteryNow;
+  bool? get chargingNow => _chargingNow;
+
+  // ── connection internals ──────────────────────────────────────────────────────────────────
+  DeviceFamily _family = DeviceFamily.whoop4;
+  Reassembler _reassembler = Reassembler();
+  BluetoothDevice? _device;
+  /// Advertised name of the strap currently being connected to, captured at scan-pick / connect time
+  /// so a successful connect can emit a fully-populated [PairedStrap]. Null when unknown.
+  String? _pairedName;
+  BluetoothCharacteristic? _cmdChar;
+  int _seq = 0;
+
+  bool _syncing = false;
+  /// Newest record timestamp (unix seconds) seen so far in the current offload, for the live
+  /// SyncProgress `currentTs`/`percent`. Reset when an offload session starts.
+  int? _offloadCurrentTsUnix;
+  bool _intentionalDisconnect = false;
+  bool _connected = false;
+  int _reconnectAttempt = 0;
+
+  Timer? _scanFallbackTimer;
+  Timer? _liveFlushTimer;
+  Timer? _offloadKickTimer;
+  Timer? _reconnectTimer;
+
+  StreamSubscription<List<ScanResult>>? _scanSub;
+  StreamSubscription<BluetoothConnectionState>? _connSub;
+  final List<StreamSubscription<List<int>>> _charSubs = [];
+
+  // ── live-persistence buffer (port of the Kotlin Collector: custom realtime/event/battery frames) ──
+  final List<Uint8List> _liveBuffer = [];
+  bool _liveFlushInFlight = false;
+
+  // ============================================================================================
+  // Public control
+  // ============================================================================================
+
+  /// Begin a connection to a WHOOP strap. When [family] is null the model is auto-detected: the
+  /// remembered family (from [rememberedStrapLookup]) seeds the scan filter if present, otherwise a
+  /// universal scan (both WHOOP4 + WHOOP5 service filters) adopts whichever family actually advertises
+  /// — so the caller never has to know the model (mirrors the Kotlin `fallbackScanModel` behaviour).
+  /// Passing an explicit [family] keeps the old service-filtered scan. No-op (surfaces an error)
+  /// off-device. Idempotent while a scan/connection is already active. Touches the radio.
+  Future<void> connect({DeviceFamily? family}) async {
+    if (!_blePlatform) {
+      lastError = 'Bluetooth LE is only available on Android/iOS.';
+      _log('connect ignored — no BLE on this platform');
+      return;
+    }
+    if (_state == BleConnectionState.scanning ||
+        _state == BleConnectionState.connecting) {
+      _log('connect ignored — already scanning/connecting');
+      return;
+    }
+    _intentionalDisconnect = false;
+    lastError = null;
+    _pairedName = null;
+
+    // Runtime permission gate first (mirrors the Kotlin caller contract).
+    final granted = await ensureBlePermissions();
+    if (!granted) {
+      lastError = 'Bluetooth permission denied.';
+      _setState(BleConnectionState.idle);
+      return;
+    }
+
+    try {
+      final supported = await FlutterBluePlus.isSupported;
+      if (!supported) {
+        lastError = 'This device has no Bluetooth LE.';
+        _setState(BleConnectionState.idle);
+        return;
+      }
+    } catch (e) {
+      _log('isSupported check failed: $e');
+    }
+
+    // Adapter power gate (mirrors the Kotlin `adapter.isEnabled` check): don't scan against a
+    // powered-off radio. Best-effort turn it on (Android); otherwise surface a clear error and stop.
+    if (!await _ensureAdapterOn()) {
+      _setState(BleConnectionState.idle);
+      return;
+    }
+
+    // Family resolution: explicit arg wins; else the remembered family seeds a filtered scan (with
+    // fallback rotation to the other family); else a universal scan adopts whichever advertises.
+    final resolved = family ?? resolveConnectFamily(rememberedStrapLookup?.call());
+    if (resolved != null) {
+      _family = resolved;
+      _startScan(resolved, allowFallback: true);
+    } else {
+      _startUniversalScan();
+    }
+  }
+
+  /// Pure family-resolution rule for a null-family [connect] (unit-testable without a radio): the
+  /// remembered strap's family if one is remembered, else null → the caller runs a universal scan.
+  static DeviceFamily? resolveConnectFamily(PairedStrap? remembered) =>
+      remembered?.family;
+
+  /// Whether the Bluetooth adapter is powered on, best-effort turning it on first (Android only).
+  /// Sets [lastError] and returns false when it stays off. Inert (returns true) off-device so tests
+  /// never touch the radio. Mirrors the Kotlin `adapter.isEnabled` gate + `ACTION_REQUEST_ENABLE`.
+  Future<bool> _ensureAdapterOn() async {
+    if (!_blePlatform) return true;
+    try {
+      final state = await FlutterBluePlus.adapterState.first;
+      if (state == BluetoothAdapterState.on) return true;
+    } catch (e) {
+      _log('adapterState read failed: $e — proceeding');
+      return true; // a read failure shouldn't hard-block a connect attempt
+    }
+    // Best-effort power-on. `turnOn()` completes once the adapter reaches ON (Android only); iOS has
+    // no programmatic toggle, so we can only surface the error there.
+    if (Platform.isAndroid) {
+      try {
+        await FlutterBluePlus.turnOn();
+        final state = await FlutterBluePlus.adapterState.first;
+        if (state == BluetoothAdapterState.on) return true;
+      } catch (e) {
+        _log('turnOn() failed: $e');
+      }
+    }
+    lastError = 'Bluetooth is off. Turn it on, then tap Connect.';
+    _log('Bluetooth is off');
+    return false;
+  }
+
+  /// Discover EVERY nearby WHOOP strap (both families) so the UI can show a picker instead of
+  /// auto-connecting to the first advertiser. Starts a scan filtered to both WHOOP4 + WHOOP5 service
+  /// UUIDs and emits the growing, de-duplicated-by-id list as advertisements arrive; the scan stops
+  /// on [timeout], on stream cancel, or on [dispose]. This does NOT connect — call [connectToStrap]
+  /// with the chosen entry.
+  ///
+  /// Guarded by platform (emits an empty list off-device), permission-gated via
+  /// `ensureBlePermissions()`, and adapter-gated (Fix 1) — a denied permission or a powered-off
+  /// adapter emits an empty list and sets [lastError] instead of touching the radio further.
+  Stream<List<DiscoveredStrap>> discoverStraps(
+      {Duration timeout = const Duration(seconds: 12)}) {
+    final controller = StreamController<List<DiscoveredStrap>>();
+    StreamSubscription<List<ScanResult>>? sub;
+    Timer? stopTimer;
+    final found = <String, DiscoveredStrap>{};
+
+    Future<void> stop() async {
+      stopTimer?.cancel();
+      await sub?.cancel();
+      sub = null;
+      if (_blePlatform) {
+        try {
+          await FlutterBluePlus.stopScan();
+        } catch (_) {}
+      }
+    }
+
+    controller.onCancel = () async {
+      await stop();
+    };
+
+    Future<void> run() async {
+      if (!_blePlatform) {
+        controller.add(const <DiscoveredStrap>[]);
+        await controller.close();
+        return;
+      }
+      final granted = await ensureBlePermissions();
+      if (!granted) {
+        lastError = 'Bluetooth permission denied.';
+        controller.add(const <DiscoveredStrap>[]);
+        await controller.close();
+        return;
+      }
+      if (!await _ensureAdapterOn()) {
+        controller.add(const <DiscoveredStrap>[]);
+        await controller.close();
+        return;
+      }
+
+      sub = FlutterBluePlus.scanResults.listen((results) {
+        var changed = false;
+        for (final r in results) {
+          final family = _familyOfResult(r);
+          if (family == null) continue;
+          final id = r.device.remoteId.str;
+          final name = r.advertisementData.advName.isNotEmpty
+              ? r.advertisementData.advName
+              : (r.device.platformName.isNotEmpty
+                  ? r.device.platformName
+                  : 'WHOOP ${family == DeviceFamily.whoop5 ? '5' : '4'}');
+          final existing = found[id];
+          if (existing == null ||
+              existing.rssi != r.rssi ||
+              existing.name != name) {
+            found[id] = DiscoveredStrap(
+                id: id, name: name, rssi: r.rssi, family: family);
+            changed = true;
+          }
+        }
+        if (changed && !controller.isClosed) {
+          final list = found.values.toList()
+            ..sort((a, b) => b.rssi.compareTo(a.rssi));
+          controller.add(list);
+        }
+      }, onError: (Object e) {
+        _log('discover scan error: $e');
+      });
+
+      stopTimer = Timer(timeout, () async {
+        await stop();
+        if (!controller.isClosed) await controller.close();
+      });
+
+      try {
+        await FlutterBluePlus.startScan(
+          withServices: [
+            Guid(DeviceFamily.whoop4.serviceUuidString),
+            Guid(DeviceFamily.whoop5.serviceUuidString),
+          ],
+          timeout: timeout,
+        );
+        _log('Discover: scanning both WHOOP families for straps');
+      } catch (e) {
+        lastError = 'Scan failed to start: $e';
+        _log(lastError!);
+        await stop();
+        if (!controller.isClosed) await controller.close();
+      }
+    }
+
+    unawaited(run());
+    return controller.stream;
+  }
+
+  /// Connect directly to a strap the user picked from [discoverStraps], skipping the auto-first-match
+  /// scan. Reuses the same connect/discover/handshake path as [connect]; the family comes from the
+  /// chosen [strap]. No-op (surfaces an error) off-device or while already scanning/connecting.
+  Future<void> connectToStrap(DiscoveredStrap strap) async {
+    if (!_blePlatform) {
+      lastError = 'Bluetooth LE is only available on Android/iOS.';
+      _log('connectToStrap ignored — no BLE on this platform');
+      return;
+    }
+    if (_state == BleConnectionState.scanning ||
+        _state == BleConnectionState.connecting) {
+      _log('connectToStrap ignored — already scanning/connecting');
+      return;
+    }
+    _intentionalDisconnect = false;
+    lastError = null;
+
+    final granted = await ensureBlePermissions();
+    if (!granted) {
+      lastError = 'Bluetooth permission denied.';
+      _setState(BleConnectionState.idle);
+      return;
+    }
+    if (!await _ensureAdapterOn()) {
+      _setState(BleConnectionState.idle);
+      return;
+    }
+
+    // Stop any auto-pick scan already in flight, then connect straight to the chosen device+family.
+    _scanFallbackTimer?.cancel();
+    await _scanSub?.cancel();
+    _scanSub = null;
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+
+    _family = strap.family;
+    _pairedName = strap.name;
+    _connectToDevice(BluetoothDevice.fromId(strap.id));
+  }
+
+  /// Reconnect directly to the remembered strap ([rememberedStrapLookup]) — `BluetoothDevice.fromId`
+  /// with the remembered family, NO scan (mirrors the Kotlin direct-connect-to-lastDevice path, which
+  /// beats a scan for a bonded strap the OS still holds or that isn't advertising). When nothing is
+  /// remembered this falls back to a universal scan-and-connect. No-op (surfaces an error) off-device
+  /// or while already scanning/connecting. This is the auto-reconnect entry point.
+  Future<void> connectRemembered() async {
+    if (!_blePlatform) {
+      lastError = 'Bluetooth LE is only available on Android/iOS.';
+      _log('connectRemembered ignored — no BLE on this platform');
+      return;
+    }
+    if (_state == BleConnectionState.scanning ||
+        _state == BleConnectionState.connecting) {
+      _log('connectRemembered ignored — already scanning/connecting');
+      return;
+    }
+    final remembered = rememberedStrapLookup?.call();
+    if (remembered == null) {
+      _log('connectRemembered — nothing remembered, running a universal scan');
+      await connect();
+      return;
+    }
+    _intentionalDisconnect = false;
+    lastError = null;
+
+    final granted = await ensureBlePermissions();
+    if (!granted) {
+      lastError = 'Bluetooth permission denied.';
+      _setState(BleConnectionState.idle);
+      return;
+    }
+    if (!await _ensureAdapterOn()) {
+      _setState(BleConnectionState.idle);
+      return;
+    }
+
+    _family = remembered.family;
+    _pairedName = remembered.name;
+    _log('Auto-reconnect: connecting directly to remembered ${remembered.family.name} strap');
+    _connectToDevice(BluetoothDevice.fromId(remembered.id));
+  }
+
+  /// Which WHOOP family (if any) a scan result advertises, by matching its advertised service UUIDs
+  /// against both families' custom service GUIDs.
+  static DeviceFamily? _familyOfResult(ScanResult r) {
+    final uuids = r.advertisementData.serviceUuids;
+    final whoop4 = Guid(DeviceFamily.whoop4.serviceUuidString);
+    final whoop5 = Guid(DeviceFamily.whoop5.serviceUuidString);
+    if (uuids.contains(whoop5)) return DeviceFamily.whoop5;
+    if (uuids.contains(whoop4)) return DeviceFamily.whoop4;
+    return null;
+  }
+
+  /// Intentional teardown: stop scanning, drop the link, and DO NOT auto-reconnect.
+  Future<void> disconnect() async {
+    _intentionalDisconnect = true;
+    _log('Disconnect requested — dropping the link (no auto-reconnect)');
+    _cancelTimers();
+    await _teardownConnection();
+    _setState(BleConnectionState.idle);
+  }
+
+  /// Release all resources. Safe to call multiple times.
+  Future<void> dispose() async {
+    _intentionalDisconnect = true;
+    _cancelTimers();
+    await _teardownConnection();
+    await _connController.close();
+    await _hrController.close();
+    await _batteryController.close();
+    await _chargingController.close();
+    await _syncController.close();
+    await _pairedController.close();
+    await _logController.close();
+  }
+
+  // ============================================================================================
+  // Scan (Kotlin scanForWhoops + the fallback rotation)
+  // ============================================================================================
+
+  void _startScan(DeviceFamily family, {required bool allowFallback}) {
+    if (!_blePlatform) return;
+    _family = family;
+    _setState(BleConnectionState.scanning);
+    _scanFallbackTimer?.cancel();
+    _scanSub?.cancel();
+
+    final serviceGuid = Guid(family.serviceUuidString);
+
+    _scanSub = FlutterBluePlus.scanResults.listen((results) {
+      if (results.isEmpty) return;
+      // First advertiser wins (the scan is already service-filtered to this family).
+      final ScanResult r = results.first;
+      _scanSub?.cancel();
+      _scanSub = null;
+      _scanFallbackTimer?.cancel();
+      _pairedName = _nameOfResult(r, family);
+      _log('Strap found: ${_pairedName!} (${family.name}) — connecting');
+      unawaited(FlutterBluePlus.stopScan());
+      _connectToDevice(r.device);
+    }, onError: (Object e) {
+      _log('scan error: $e');
+    });
+
+    // Fallback rotation: nothing on this family after [scanFallbackDelay] → try the other family
+    // (a stale/missing persisted preference can point the scan at the wrong service). (Kotlin PR#195)
+    if (allowFallback) {
+      _scanFallbackTimer = Timer(scanFallbackDelay, () {
+        if (_connected) return;
+        final fallback = _fallbackFamily(family);
+        _log('Scan: no ${family.name} found — rotating to ${fallback.name}');
+        unawaited(FlutterBluePlus.stopScan());
+        _startScan(fallback, allowFallback: false);
+      });
+    }
+
+    try {
+      unawaited(FlutterBluePlus.startScan(
+        withServices: [serviceGuid],
+        timeout: scanTimeout,
+      ));
+      _log('Scan: looking for a ${family.name} strap (${family.serviceUuidString})');
+    } catch (e) {
+      lastError = 'Scan failed to start: $e';
+      _log(lastError!);
+      _setState(BleConnectionState.idle);
+    }
+  }
+
+  static DeviceFamily _fallbackFamily(DeviceFamily f) =>
+      f == DeviceFamily.whoop4 ? DeviceFamily.whoop5 : DeviceFamily.whoop4;
+
+  /// Universal auto-detect scan: filter on BOTH families' service UUIDs at once and connect to the
+  /// first WHOOP that advertises, adopting its family from the advertised service UUID (Kotlin
+  /// `fallbackScanModel`). Used by [connect] when the caller passes no family and nothing is
+  /// remembered — the user never has to pick the model.
+  void _startUniversalScan() {
+    if (!_blePlatform) return;
+    _setState(BleConnectionState.scanning);
+    _scanFallbackTimer?.cancel();
+    _scanSub?.cancel();
+
+    _scanSub = FlutterBluePlus.scanResults.listen((results) {
+      for (final r in results) {
+        final fam = _familyOfResult(r);
+        if (fam == null) continue;
+        _scanSub?.cancel();
+        _scanSub = null;
+        _family = fam;
+        _pairedName = _nameOfResult(r, fam);
+        _log('Strap found: ${_pairedName!} (${fam.name}) — connecting');
+        unawaited(FlutterBluePlus.stopScan());
+        _connectToDevice(r.device);
+        return;
+      }
+    }, onError: (Object e) {
+      _log('universal scan error: $e');
+    });
+
+    try {
+      unawaited(FlutterBluePlus.startScan(
+        withServices: [
+          Guid(DeviceFamily.whoop4.serviceUuidString),
+          Guid(DeviceFamily.whoop5.serviceUuidString),
+        ],
+        timeout: scanTimeout,
+      ));
+      _log('Scan: universal (both WHOOP families) — auto-detecting the model');
+    } catch (e) {
+      lastError = 'Scan failed to start: $e';
+      _log(lastError!);
+      _setState(BleConnectionState.idle);
+    }
+  }
+
+  /// The advertised name for a scan result, or a family-derived fallback when the advert carries none
+  /// (mirrors the [discoverStraps] naming).
+  static String _nameOfResult(ScanResult r, DeviceFamily family) =>
+      r.advertisementData.advName.isNotEmpty
+          ? r.advertisementData.advName
+          : (r.device.platformName.isNotEmpty
+              ? r.device.platformName
+              : 'WHOOP ${family == DeviceFamily.whoop5 ? '5' : '4'}');
+
+  // ============================================================================================
+  // Connect + discover (Kotlin connectToDevice + onConnectionStateChange + onServicesDiscovered)
+  // ============================================================================================
+
+  Future<void> _connectToDevice(BluetoothDevice device) async {
+    _device = device;
+    _setState(BleConnectionState.connecting);
+    _log('Connecting to ${device.remoteId.str} (${_family.name})');
+    _reassembler = Reassembler(_family);
+
+    _connSub?.cancel();
+    _connSub = device.connectionState.listen((s) {
+      if (s == BluetoothConnectionState.connected) {
+        _onConnected(device);
+      } else if (s == BluetoothConnectionState.disconnected) {
+        _onDisconnected();
+      }
+    });
+
+    try {
+      // License.nonprofit: NOOP is an open-source app with no Pro tier (see the flutter_blue_plus 2.x
+      // source-available license). A commercial release would need the paid license instead.
+      await device.connect(
+          license: License.nonprofit, timeout: const Duration(seconds: 35));
+    } catch (e) {
+      _log('connect() failed: $e');
+      _onDisconnected();
+    }
+  }
+
+  Future<void> _onConnected(BluetoothDevice device) async {
+    if (_connected) return; // guard against duplicate connected events
+    _connected = true;
+    _reconnectAttempt = 0; // a real connect clears the backoff (Kotlin resetReconnectBackoff)
+    _reassembler.reset();
+    _log('Connected — discovering services');
+
+    List<BluetoothService> services;
+    try {
+      services = await device.discoverServices();
+    } catch (e) {
+      _log('discoverServices failed: $e');
+      return;
+    }
+    _log('Services discovered (${services.length})');
+
+    // Locate the custom WHOOP service for the family we scanned for; if the OTHER family answered
+    // (fallback rotation raced), adopt it. Mirrors the Kotlin whoop4/whoop5 branch.
+    BluetoothService? custom = _serviceByUuid(services, _family.serviceUuidString);
+    if (custom == null) {
+      final other = _fallbackFamily(_family);
+      final maybe = _serviceByUuid(services, other.serviceUuidString);
+      if (maybe != null) {
+        _family = other;
+        _reassembler = Reassembler(_family)..reset();
+        custom = maybe;
+      }
+    }
+    if (custom == null) {
+      _log('Custom WHOOP service not found on this peripheral');
+      lastError = 'Not a WHOOP strap (service not found).';
+      return;
+    }
+
+    _cmdChar = _charByUuid(custom, _family.commandCharacteristicUuidString);
+
+    // Standard profiles first (they work unbonded — the reliable HR + battery source).
+    final hrChar = _standardChar(services, _hrServiceUuid, _hrCharUuid);
+    final battChar = _standardChar(services, _batteryServiceUuid, _batteryCharUuid);
+    if (hrChar != null) {
+      await _subscribe(hrChar, (v) => _onStandardHr(v));
+    }
+    if (battChar != null) {
+      await _subscribe(battChar, (v) => _onStandardBattery(v));
+    }
+
+    if (_family == DeviceFamily.whoop5) {
+      await _bringUpWhoop5(custom);
+    } else {
+      await _bringUpWhoop4(custom);
+    }
+
+    _setState(BleConnectionState.connected);
+    // We have the real device id + the resolved family now — publish the pairing so the provider layer
+    // can remember it for auto-reconnect on a later launch.
+    _publishPaired(PairedStrap(
+      id: device.remoteId.str,
+      family: _family,
+      name: _pairedName,
+    ));
+    _startLiveFlushTimer();
+    _runConnectHandshake();
+  }
+
+  /// WHOOP 4.0 bring-up: subscribe the three custom notify chars (CMD/EVENT/DATA). Kotlin fires a
+  /// confirmed GET_BATTERY_LEVEL "bond" write once notifications are on — we do the same in the
+  /// handshake, so the bond write never races the CCCD subscribes (Kotlin issue #12).
+  Future<void> _bringUpWhoop4(BluetoothService custom) async {
+    for (final uuid in _notifyUuids(DeviceFamily.whoop4)) {
+      final ch = _charByUuid(custom, uuid);
+      if (ch != null) await _subscribe(ch, _onCustomFrameBytes);
+    }
+  }
+
+  /// WHOOP 5.0/MG bring-up (experimental, mirrors the Kotlin 5/MG path): write CLIENT_HELLO to the
+  /// command char (just-works bond), subscribe the puffin notify chars, then send the R22 enable
+  /// sequence to unlock the deep biometric streams the strap withholds from a fresh client.
+  Future<void> _bringUpWhoop5(BluetoothService custom) async {
+    final hello = DeviceFamily.whoop5.clientHello;
+    final cmd = _cmdChar;
+    if (hello != null && cmd != null) {
+      await _write(cmd, hello);
+      _log('WHOOP 5/MG: CLIENT_HELLO sent');
+    }
+    for (final uuid in _notifyUuids(DeviceFamily.whoop5)) {
+      final ch = _charByUuid(custom, uuid);
+      if (ch != null) await _subscribe(ch, _onCustomFrameBytes);
+    }
+    await _sendR22EnableSequence();
+  }
+
+  /// Send the 15-flag [Whoop5Config.enableR22Sequence], each as one SET_CONFIG puffin write, spaced
+  /// ~80ms apart (mirrors the Kotlin enableWhoop5DeepData cadence). Reversible; only changes which
+  /// data the strap emits.
+  Future<void> _sendR22EnableSequence() async {
+    final cmd = _cmdChar;
+    if (cmd == null) return;
+    _log('Deep-data: sending the ${Whoop5Config.enableR22Sequence.length}-flag enable_r22 sequence');
+    for (final flag in Whoop5Config.enableR22Sequence) {
+      if (!_connected) return;
+      _seq = (_seq + 1) & 0xFF;
+      final frame = Whoop5Config.frame(flag, _seq);
+      await _write(cmd, frame);
+      await Future<void>.delayed(r22FlagSpacing);
+    }
+  }
+
+  // ============================================================================================
+  // Connect handshake + command sequence (Kotlin runConnectHandshake)
+  // ============================================================================================
+
+  /// The connect-time command sequence, in the Kotlin order: SET_CLOCK (so the strap latches its RTC
+  /// and resumes banking to flash) → GET_DATA_RANGE (refresh the stored range) → then, deferred by
+  /// [initialBackfillDelay] so the first two round-trip on a settled link, kick the historical offload.
+  void _runConnectHandshake() {
+    // SET_CLOCK: WHOOP4 gets both firmware forms (8-byte + legacy 9-byte); 5/MG the single 8-byte form.
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    _send(CommandNumber.setClock, payload: _setClockPayload(now));
+    if (_family == DeviceFamily.whoop4) {
+      _send(CommandNumber.setClock, payload: _setClockPayloadLegacy(now));
+      // Stop the unprompted type-43 realtime raw flood (it eats BLE airtime). Kotlin sends this too.
+      _send(CommandNumber.sendR10R11Realtime, payload: const [0]);
+    }
+    _send(CommandNumber.getDataRange, payload: const []);
+    _log('Connect handshake sent (set-clock/get-range)');
+
+    // Historical offload: the type-47 store is the PRIMARY metric source. Kick it once on connect,
+    // deferred so SET_CLOCK/GET_DATA_RANGE round-trip first (Kotlin asyncAfter(1.5s) { requestSync }).
+    _offloadKickTimer?.cancel();
+    _offloadKickTimer = Timer(initialBackfillDelay, _beginBackfill);
+  }
+
+  /// SET_CLOCK(10) 8-byte form: [seconds u32 LE][subseconds u32 LE]. Port of Kotlin setClockPayload.
+  List<int> _setClockPayload(int now) => [
+        now & 0xFF,
+        (now >> 8) & 0xFF,
+        (now >> 16) & 0xFF,
+        (now >> 24) & 0xFF,
+        0, 0, 0, 0,
+      ];
+
+  /// SET_CLOCK(10) legacy 9-byte form for WHOOP 4 fw 41.17.x. Port of Kotlin setClockPayloadLegacy.
+  List<int> _setClockPayloadLegacy(int now) => [
+        now & 0xFF,
+        (now >> 8) & 0xFF,
+        (now >> 16) & 0xFF,
+        (now >> 24) & 0xFF,
+        0, 0, 0, 0, 0,
+      ];
+
+  // ============================================================================================
+  // Historical offload (Kotlin beginBackfill)
+  // ============================================================================================
+
+  /// Start a historical-offload session: tell the state machine to begin, flip the routing flag,
+  /// and kick the strap with SEND_HISTORICAL_DATA. Port of the Kotlin beginBackfill happy path.
+  void _beginBackfill() {
+    if (!_connected || _syncing) return;
+    _backfiller.begin(_family); // family drives the +4 puffin offset for 5/MG
+    _syncing = true;
+    _offloadCurrentTsUnix = null;
+    _setState(BleConnectionState.syncing);
+    _emitSyncProgress('offloading');
+    // Payload MUST be [0x00], not empty: verified on-device that the strap serves type-47 only with
+    // [0x00] (Kotlin sendHistoricalKick).
+    _send(CommandNumber.sendHistoricalData, payload: const [0], withResponse: true);
+    _log('Backfill: session started — historical offload requested');
+  }
+
+  /// A committed offload chunk: advance the "which day is syncing" cursor to the newest record ts in
+  /// the chunk, then emit a fresh SyncProgress so the UI's percent/current-day tick live.
+  void _onChunkCommitted(StreamBatch batch) {
+    final newest = _newestBatchTsUnix(batch);
+    if (newest != null &&
+        (_offloadCurrentTsUnix == null || newest > _offloadCurrentTsUnix!)) {
+      _offloadCurrentTsUnix = newest;
+    }
+    _log('Offload chunk committed — ${_backfiller.sessionRowsPersisted} records so far');
+    _emitSyncProgress('offloading');
+  }
+
+  /// The newest wall-clock unix-seconds timestamp across every row list in a committed chunk, or null
+  /// if the chunk carries no timestamped rows.
+  static int? _newestBatchTsUnix(StreamBatch b) {
+    int? best;
+    void consider(int ts) {
+      if (best == null || ts > best!) best = ts;
+    }
+
+    for (final r in b.hr) {
+      consider(r.ts);
+    }
+    for (final r in b.rr) {
+      consider(r.ts);
+    }
+    for (final r in b.events) {
+      consider(r.ts);
+    }
+    for (final r in b.battery) {
+      consider(r.ts);
+    }
+    for (final r in b.spo2) {
+      consider(r.ts);
+    }
+    for (final r in b.skinTemp) {
+      consider(r.ts);
+    }
+    for (final r in b.resp) {
+      consider(r.ts);
+    }
+    for (final r in b.gravity) {
+      consider(r.ts);
+    }
+    for (final r in b.steps) {
+      consider(r.ts);
+    }
+    for (final r in b.sleepState) {
+      consider(r.ts);
+    }
+    for (final r in b.ppgHr) {
+      consider(r.ts);
+    }
+    return best;
+  }
+
+  /// The Backfiller's safe-trim ack: confirm one HISTORY_END chunk so the strap may trim it. Payload
+  /// = [0x01] + the verbatim 8-byte HISTORY_END end_data (Kotlin HISTORICAL_DATA_RESULT).
+  void _ackTrim(int trim, Uint8List endData) {
+    _send(CommandNumber.historicalDataResult,
+        payload: [0x01, ...endData], withResponse: true);
+  }
+
+  void _finishOffload() {
+    if (!_syncing) return;
+    _syncing = false;
+    _emitSyncProgress('complete');
+    _setState(_connected ? BleConnectionState.connected : BleConnectionState.idle);
+    _log('Backfill: offload complete (${_backfiller.sessionRowsPersisted} rows this session)');
+  }
+
+  // ============================================================================================
+  // Inbound routing (Kotlin onInbound / onCharacteristicChanged)
+  // ============================================================================================
+
+  /// Standard 0x2A37 HR profile — the reliable, always-on live-HR + R-R source.
+  void _onStandardHr(List<int> data) {
+    final parsed = _parseStandardHr(data);
+    if (parsed == null) return;
+    final hr = parsed.$1;
+    final rr = parsed.$2;
+    if (hr >= 30 && hr <= 220) _publishHr(hr);
+    // Persist the reliable standard stream directly (carries a wall-clock ts).
+    final ts = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final batch = StreamBatch(
+      hr: [HrRow(ts, hr)],
+      rr: [for (final r in rr) if (r >= 250 && r <= 3000) RrRow(ts, r)],
+    );
+    if (!batch.isEmpty) {
+      unawaited(_streamRepository.insert(batch, deviceId).catchError((Object e) {
+        _log('standard-HR persist failed: $e');
+        return const InsertCounts();
+      }));
+    }
+  }
+
+  /// Parse a standard HR characteristic value → (hr, rrIntervalsMs). Port of Kotlin parseStandardHr.
+  (int, List<int>)? _parseStandardHr(List<int> data) {
+    if (data.isEmpty) return null;
+    final flags = data[0] & 0xFF;
+    final hr16 = (flags & 0x01) != 0;
+    final rrPresent = (flags & 0x10) != 0;
+    var idx = 1;
+    final int hr;
+    if (hr16) {
+      if (data.length < idx + 2) return null;
+      hr = (data[idx] & 0xFF) | ((data[idx + 1] & 0xFF) << 8);
+      idx += 2;
+    } else {
+      if (data.length < idx + 1) return null;
+      hr = data[idx] & 0xFF;
+      idx += 1;
+    }
+    // Energy-expended field (bit3) precedes R-R if present — skip its 2 bytes.
+    if ((flags & 0x08) != 0) idx += 2;
+    final rr = <int>[];
+    if (rrPresent) {
+      while (idx + 1 < data.length) {
+        final raw = (data[idx] & 0xFF) | ((data[idx + 1] & 0xFF) << 8);
+        idx += 2;
+        rr.add((raw * 1000) ~/ 1024); // 1/1024 s units → ms
+      }
+    }
+    return (hr, rr);
+  }
+
+  /// Standard 0x2A19 battery — first byte is the percent. 5/MG only (on WHOOP4 this char is a stub
+  /// constant; the real value is the GET_BATTERY_LEVEL command response). Mirrors Kotlin.
+  void _onStandardBattery(List<int> data) {
+    if (_family == DeviceFamily.whoop4) return;
+    if (data.isEmpty) return;
+    _publishBattery((data[0] & 0xFF) / 100.0);
+  }
+
+  /// Custom-channel bytes → reassemble → route each complete frame. Port of the Kotlin reassembler
+  /// feed loop, wrapped so one bad frame drops that frame and the link stays up.
+  void _onCustomFrameBytes(List<int> bytes) {
+    for (final frame in _reassembler.feed(Uint8List.fromList(bytes))) {
+      try {
+        _handleFrame(frame);
+      } catch (e) {
+        _log('inbound frame handling threw $e — dropping this frame, link stays up');
+      }
+    }
+  }
+
+  void _handleFrame(Uint8List frame) {
+    final parsed = Framing.parseFrame(frame, _family);
+    if (parsed.crcOk == false) return;
+
+    // Command responses feed the session gates + WHOOP4 battery, whether or not we're mid-offload.
+    if (parsed.typeName == 'COMMAND_RESPONSE') {
+      _handleCommandResponse(frame, parsed);
+    }
+
+    if (_syncing) {
+      // Route ONLY genuine offload frames through the serial backfill drain (preserves chunk order).
+      // The live type-40/43 flood is dropped here — extractHistoricalStreams ignores it and feeding
+      // it only stalls the strap. Live HR still flows over the standard 0x2A37 profile. (Kotlin.)
+      if (_isOffloadFrame(frame, _family)) {
+        _ingestBackfill(frame);
+      }
+    } else {
+      // Live path: publish HR immediately + buffer for a batched decode+insert (Kotlin Collector).
+      _publishLiveHrFromRealtime(parsed);
+      _bufferLiveFrame(frame);
+    }
+  }
+
+  void _handleCommandResponse(Uint8List frame, ParsedFrame parsed) {
+    // WHOOP4 battery arrives as a GET_BATTERY_LEVEL command response (u16/10 → percent). This path
+    // also carries the charging bit when present, so surface it alongside the fraction.
+    final pct = parsed.parsed.doubleOrNull('battery_pct');
+    if (pct != null) {
+      final chargingRaw = parsed.parsed.intOrNull('battery_charging');
+      _publishBattery(pct / 100.0,
+          charging: chargingRaw == null ? null : chargingRaw != 0);
+    }
+
+    // GET_DATA_RANGE: publish the strap's banked-record window to the Backfiller so the historical
+    // ingest gate can reject records dated outside THIS strap's own [oldest, newest] (Kotlin #547).
+    final cmdOff = _family == DeviceFamily.whoop5 ? 10 : 6;
+    if (frame.length > cmdOff &&
+        (frame[cmdOff] & 0xFF) == CommandNumber.getDataRange.rawValue) {
+      final newest = _dataRangeNewestUnix(frame);
+      if (newest != null) {
+        _backfiller.sessionNewestUnix = newest;
+        final oldest = _dataRangeOldestUnix(frame);
+        if (oldest != null && oldest < newest) {
+          _backfiller.sessionOldestUnix = oldest;
+        }
+      }
+    }
+  }
+
+  /// Serial backfill drain: [Backfiller.ingest] already serialises internally, so chaining its
+  /// futures preserves chunk order; when the state machine consumes HISTORY_COMPLETE we exit cleanly.
+  void _ingestBackfill(Uint8List frame) {
+    unawaited(_backfiller.ingest(frame).then((_) {
+      _emitSyncProgress('offloading');
+      if (_syncing && !_backfiller.isBackfilling) _finishOffload();
+    }).catchError((Object e) {
+      _log('Backfill: drain error ($e) — skipping frame, offload continues');
+    }));
+  }
+
+  void _publishLiveHrFromRealtime(ParsedFrame parsed) {
+    if (parsed.typeName != 'REALTIME_DATA') return;
+    final bpm = parsed.parsed.intOrNull('heart_rate');
+    if (bpm != null && bpm >= 30 && bpm <= 220) _publishHr(bpm);
+  }
+
+  // ── live-frame buffering + flush (Kotlin Collector.ingest / flush) ─────────────────────────
+  void _bufferLiveFrame(Uint8List frame) {
+    _liveBuffer.add(frame);
+    if (_liveBuffer.length >= liveFlushMaxFrames) unawaited(_flushLive());
+  }
+
+  void _startLiveFlushTimer() {
+    _liveFlushTimer?.cancel();
+    _liveFlushTimer = Timer.periodic(liveFlushInterval, (_) => unawaited(_flushLive()));
+  }
+
+  /// Decode the buffered live frames and persist them. Anchors the batch's NEWEST realtime timestamp
+  /// to wall-clock `now` so live HR lands on today's timeline whatever the strap's (possibly invalid)
+  /// RTC says — a no-op when the clock is already valid. Port of Kotlin flushLive.
+  Future<void> _flushLive() async {
+    if (_liveFlushInFlight || _liveBuffer.isEmpty) return;
+    _liveFlushInFlight = true;
+    final frames = List<Uint8List>.from(_liveBuffer);
+    _liveBuffer.clear();
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final parsed = [for (final f in frames) Framing.parseFrame(f, _family)];
+      var newestRealtime = now;
+      for (final p in parsed) {
+        if (p.ok && p.crcOk != false && p.typeName == 'REALTIME_DATA') {
+          final ts = p.parsed.intOrNull('timestamp');
+          if (ts != null && ts > newestRealtime) newestRealtime = ts;
+        }
+      }
+      final streams = extractStreams(parsed, newestRealtime, now);
+      final batch = StreamPersistence.toBatch(streams);
+      if (!batch.isEmpty) {
+        await _streamRepository.insert(batch, deviceId);
+      }
+    } catch (e) {
+      // Re-buffer at the front so these frames retry on the next cadence (Kotlin Collector).
+      _liveBuffer.insertAll(0, frames);
+      _log('live flush failed: $e');
+    } finally {
+      _liveFlushInFlight = false;
+    }
+  }
+
+  // ============================================================================================
+  // Disconnect + reconnect (Kotlin handleDisconnect + ReconnectBackoff)
+  // ============================================================================================
+
+  void _onDisconnected() {
+    final wasConnected = _connected;
+    _connected = false;
+    _syncing = false;
+    _cmdChar = null;
+    for (final s in _charSubs) {
+      s.cancel();
+    }
+    _charSubs.clear();
+    _liveFlushTimer?.cancel();
+    _offloadKickTimer?.cancel();
+    _reassembler.reset();
+    _publishHr(null);
+    if (wasConnected) _publishPaired(null);
+
+    if (_intentionalDisconnect) {
+      _setState(BleConnectionState.idle);
+      return;
+    }
+    // Involuntary drop → capped-exponential reconnect (Kotlin ReconnectBackoff).
+    _reconnectAttempt += 1;
+    final delayMs = ReconnectBackoff.nextDelayMs(_reconnectAttempt);
+    _log('Disconnected${wasConnected ? '' : ' (never connected)'}; '
+        'reconnecting in ${delayMs ~/ 1000}s (attempt $_reconnectAttempt)');
+    _setState(BleConnectionState.idle);
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
+      if (_intentionalDisconnect) return;
+      final device = _device;
+      if (device != null) {
+        // Reconnect straight to the strap we last connected to (no scan).
+        _connectToDevice(device);
+      } else {
+        _startScan(_family, allowFallback: true);
+      }
+    });
+  }
+
+  Future<void> _teardownConnection() async {
+    await _scanSub?.cancel();
+    _scanSub = null;
+    if (_blePlatform) {
+      try {
+        await FlutterBluePlus.stopScan();
+      } catch (_) {}
+    }
+    for (final s in _charSubs) {
+      await s.cancel();
+    }
+    _charSubs.clear();
+    await _connSub?.cancel();
+    _connSub = null;
+    final device = _device;
+    if (device != null && _blePlatform) {
+      try {
+        await device.disconnect();
+      } catch (_) {}
+    }
+    _connected = false;
+    _syncing = false;
+    _cmdChar = null;
+    _liveBuffer.clear();
+  }
+
+  void _cancelTimers() {
+    _scanFallbackTimer?.cancel();
+    _liveFlushTimer?.cancel();
+    _offloadKickTimer?.cancel();
+    _reconnectTimer?.cancel();
+  }
+
+  // ============================================================================================
+  // Command send (Kotlin send) — family-aware framing
+  // ============================================================================================
+
+  void _send(CommandNumber cmd, {List<int>? payload, bool withResponse = false}) {
+    final ch = _cmdChar;
+    if (ch == null) {
+      _log('send(${cmd.name}) ignored — no command characteristic');
+      return;
+    }
+    _seq = (_seq + 1) & 0xFF;
+    final Uint8List frame;
+    if (_family == DeviceFamily.whoop5) {
+      frame = Framing.puffinCommandFrame(
+        cmd: cmd.rawValue,
+        seq: _seq,
+        payload: payload == null ? null : Uint8List.fromList(payload),
+      );
+    } else {
+      frame = Framing.buildCommand(cmd,
+          payload: payload == null ? null : Uint8List.fromList(payload),
+          seq: _seq);
+    }
+    // The WHOOP command characteristic supports write-with-response; use it for every command
+    // (a dropped without-response write silently breaks SET_CLOCK / the offload ack). withResponse
+    // is retained for call-site intent parity with the Kotlin send().
+    unawaited(_write(ch, frame));
+  }
+
+  Future<void> _write(BluetoothCharacteristic ch, Uint8List value,
+      {bool withoutResponse = false}) async {
+    if (!_blePlatform) return;
+    try {
+      await ch.write(value, withoutResponse: withoutResponse);
+    } catch (e) {
+      _log('write to ${ch.uuid} failed: $e');
+    }
+  }
+
+  // ============================================================================================
+  // GATT helpers
+  // ============================================================================================
+
+  /// Enable notifications (writes the CCCD) then wire the value listener. Cancels with the device.
+  Future<void> _subscribe(
+      BluetoothCharacteristic ch, void Function(List<int>) onValue) async {
+    if (!_blePlatform) return;
+    final sub = ch.onValueReceived.listen(onValue);
+    _device?.cancelWhenDisconnected(sub);
+    _charSubs.add(sub);
+    try {
+      await ch.setNotifyValue(true);
+    } catch (e) {
+      _log('setNotifyValue failed for ${ch.uuid}: $e');
+    }
+  }
+
+  static BluetoothService? _serviceByUuid(
+      List<BluetoothService> services, String uuid) {
+    final want = Guid(uuid);
+    for (final s in services) {
+      if (s.uuid == want) return s;
+    }
+    return null;
+  }
+
+  static BluetoothCharacteristic? _charByUuid(
+      BluetoothService service, String uuid) {
+    final want = Guid(uuid);
+    for (final c in service.characteristics) {
+      if (c.uuid == want) return c;
+    }
+    return null;
+  }
+
+  static BluetoothCharacteristic? _standardChar(
+      List<BluetoothService> services, String serviceUuid, String charUuid) {
+    final svc = _serviceByUuid(services, serviceUuid);
+    if (svc == null) return null;
+    return _charByUuid(svc, charUuid);
+  }
+
+  /// Notify characteristic UUIDs for a family = every custom characteristic except the …0002 command
+  /// write char (WHOOP4 → 0003/0004/0005; WHOOP5 → 0003/0004/0005/0007).
+  static List<String> _notifyUuids(DeviceFamily family) {
+    final cmd = family.commandCharacteristicUuidString;
+    return [
+      for (final u in family.characteristicUuidStrings)
+        if (u != cmd) u
+    ];
+  }
+
+  // Standard GATT profiles (full 128-bit forms so Guid equality is unambiguous).
+  static const String _hrServiceUuid = '0000180d-0000-1000-8000-00805f9b34fb';
+  static const String _hrCharUuid = '00002a37-0000-1000-8000-00805f9b34fb';
+  static const String _batteryServiceUuid = '0000180f-0000-1000-8000-00805f9b34fb';
+  static const String _batteryCharUuid = '00002a19-0000-1000-8000-00805f9b34fb';
+
+  // ── GET_DATA_RANGE scan (Kotlin dataRangeNewestUnix / dataRangeOldestUnix) ──────────────────
+  int? _dataRangeNewestUnix(Uint8List frame) {
+    if (frame.length <= 7) return null;
+    int? newest;
+    for (var i = 7; i + 4 <= frame.length; i += 4) {
+      final w = (frame[i] & 0xFF) |
+          ((frame[i + 1] & 0xFF) << 8) |
+          ((frame[i + 2] & 0xFF) << 16) |
+          ((frame[i + 3] & 0xFF) << 24);
+      if (w >= _unixFloor && w <= _unixCeil) {
+        newest = newest == null ? w : (w > newest ? w : newest);
+      }
+    }
+    return newest;
+  }
+
+  int? _dataRangeOldestUnix(Uint8List frame) {
+    if (frame.length <= 7) return null;
+    int? oldest;
+    for (var i = 7; i + 4 <= frame.length; i += 4) {
+      final w = (frame[i] & 0xFF) |
+          ((frame[i + 1] & 0xFF) << 8) |
+          ((frame[i + 2] & 0xFF) << 16) |
+          ((frame[i + 3] & 0xFF) << 24);
+      if (w >= _unixFloor && w <= _unixCeil) {
+        oldest = oldest == null ? w : (w < oldest ? w : oldest);
+      }
+    }
+    return oldest;
+  }
+
+  /// Whether a complete frame is a historical-offload frame (HISTORICAL_DATA/EVENT/METADATA/
+  /// CONSOLE_LOGS, incl. the 5/MG puffin metadata type) vs the live REALTIME flood. The type byte
+  /// sits at offset 4 (WHOOP4) or 8 (WHOOP5 puffin +4). The Backfiller re-validates every frame.
+  static bool _isOffloadFrame(Uint8List frame, DeviceFamily family) {
+    final off = family == DeviceFamily.whoop5 ? 8 : 4;
+    if (frame.length <= off) return false;
+    final t = frame[off] & 0xFF;
+    return t == PacketType.historicalData.rawValue || // 47
+        t == PacketType.event.rawValue || // 48
+        t == PacketType.metadata.rawValue || // 49
+        t == PacketType.consoleLogs.rawValue || // 50
+        t == PuffinPacketType.puffinMetadata; // 56
+  }
+
+  // ============================================================================================
+  // Publish helpers
+  // ============================================================================================
+
+  void _setState(BleConnectionState s) {
+    _state = s;
+    if (!_connController.isClosed) _connController.add(s);
+  }
+
+  void _publishHr(int? hr) {
+    _hrNow = hr;
+    if (!_hrController.isClosed) _hrController.add(hr);
+  }
+
+  /// Publish the battery fraction and, additively, the charging flag. [charging] is null when the
+  /// source carries no charging bit (standard 0x2A19) — the fraction and charging are independent
+  /// signals so the UI can keep the last-known fraction while charging goes null.
+  void _publishBattery(double frac, {bool? charging}) {
+    final v = frac.clamp(0.0, 1.0);
+    _batteryNow = v;
+    if (!_batteryController.isClosed) _batteryController.add(v);
+    _publishCharging(charging);
+  }
+
+  void _publishCharging(bool? charging) {
+    _chargingNow = charging;
+    if (!_chargingController.isClosed) _chargingController.add(charging);
+  }
+
+  void _publishPaired(PairedStrap? strap) {
+    if (!_pairedController.isClosed) _pairedController.add(strap);
+  }
+
+  void _emitSyncProgress(String phase) {
+    if (_syncController.isClosed) return;
+    final oldest = _backfiller.sessionOldestUnix;
+    final newest = _backfiller.sessionNewestUnix;
+    final current = _offloadCurrentTsUnix;
+
+    // Percent = how far the newest-decoded record has advanced through the strap's [oldest, newest]
+    // banked span. Only meaningful while offloading with a known range and a landed record.
+    double? percent;
+    if (phase == 'offloading' &&
+        oldest != null &&
+        newest != null &&
+        newest > oldest &&
+        current != null) {
+      percent = ((current - oldest) / (newest - oldest)).clamp(0.0, 1.0);
+    } else if (phase == 'complete' && oldest != null && newest != null) {
+      percent = 1.0;
+    }
+
+    _syncController.add(SyncProgress(
+      recordsPersisted: _backfiller.sessionRowsPersisted,
+      phase: phase,
+      percent: percent,
+      currentTsMs: current == null ? null : current * 1000,
+      oldestTsMs: oldest == null ? null : oldest * 1000,
+      newestTsMs: newest == null ? null : newest * 1000,
+    ));
+  }
+
+  void _log(String line) {
+    if (kDebugMode) debugPrint('[WhoopBleClient] $line');
+    // Append to the rolling buffer (device-runtime timestamp) and republish the whole trace. This
+    // only ever runs once the client is used (connect/scan) — construction touches no _log.
+    _logBuffer.add(ConnLogEntry(DateTime.now(), line));
+    if (_logBuffer.length > _maxLogEntries) {
+      _logBuffer.removeRange(0, _logBuffer.length - _maxLogEntries);
+    }
+    if (!_logController.isClosed) {
+      _logController.add(List.unmodifiable(_logBuffer));
+    }
+  }
+}
