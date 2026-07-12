@@ -14,7 +14,7 @@ class Reveal extends StatefulWidget {
   final Widget child;
   final int index;
   final double shift;
-  const Reveal({super.key, required this.child, this.index = 0, this.shift = 34});
+  const Reveal({super.key, required this.child, this.index = 0, this.shift = 46});
 
   @override
   State<Reveal> createState() => _RevealState();
@@ -23,7 +23,7 @@ class Reveal extends StatefulWidget {
 class _RevealState extends State<Reveal> with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 480),
+    duration: const Duration(milliseconds: 560),
   );
   late final Animation<double> _t =
       CurvedAnimation(parent: _c, curve: kEmphasizedDecelerate);
@@ -32,7 +32,7 @@ class _RevealState extends State<Reveal> with SingleTickerProviderStateMixin {
   void initState() {
     super.initState();
     // Stagger: cap the delay so long lists still finish promptly.
-    final delayMs = (widget.index.clamp(0, 10)) * 55;
+    final delayMs = (widget.index.clamp(0, 12)) * 68;
     Future<void>.delayed(Duration(milliseconds: delayMs), () {
       if (mounted) _c.forward();
     });
@@ -47,14 +47,22 @@ class _RevealState extends State<Reveal> with SingleTickerProviderStateMixin {
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
         animation: _t,
-        builder: (context, child) => Opacity(
-          opacity: _t.value,
-          child: Transform.translate(
-            // Enters from the right (+x) and slides left to rest at 0.
-            offset: Offset((1 - _t.value) * widget.shift, 0),
-            child: child,
-          ),
-        ),
+        builder: (context, child) {
+          final t = _t.value;
+          // Enters from the right (+x) with a slight lift and scale-up, settling
+          // to rest — a touch more life than a flat slide.
+          return Opacity(
+            opacity: t.clamp(0.0, 1.0),
+            child: Transform.translate(
+              offset: Offset((1 - t) * widget.shift, (1 - t) * 14),
+              child: Transform.scale(
+                scale: 0.965 + 0.035 * t,
+                alignment: Alignment.centerLeft,
+                child: child,
+              ),
+            ),
+          );
+        },
         child: widget.child,
       );
 }

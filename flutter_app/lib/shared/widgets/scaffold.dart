@@ -105,24 +105,36 @@ class ScreenScaffold extends StatelessWidget {
   }
 }
 
-/// The app-wide back button — a bare rounded back arrow in a circular tap
-/// target. Use this everywhere a screen needs a back affordance so it stays
-/// consistent; never hand-roll another.
+/// The app-wide back button — a rounded back arrow centred in a frosted
+/// circular chip (a real, tappable 40×40 mobile target with a hairline edge,
+/// not a bare glyph). Use this everywhere a screen needs a back affordance so
+/// it stays byte-for-byte identical; never hand-roll another.
 class NoopBackButton extends StatelessWidget {
   final VoidCallback onTap;
   const NoopBackButton({super.key, required this.onTap});
 
+  /// Fixed diameter — matches the CenteredHeader slot and the header inset so
+  /// the button reads as centred in the top-left corner on every screen.
+  static const double size = 40;
+
   @override
   Widget build(BuildContext context) => Material(
-        color: Colors.transparent,
-        shape: const CircleBorder(),
+        color: Palette.surfaceOverlay.withValues(alpha: 0.55),
+        shape: CircleBorder(
+          side: BorderSide(
+            color: Palette.hairline.withValues(alpha: 0.6),
+            width: 1,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
           customBorder: const CircleBorder(),
           onTap: onTap,
           child: SizedBox(
-            width: 40,
-            height: 40,
-            child: Icon(Icons.arrow_back_rounded, size: 24, color: Palette.textPrimary),
+            width: size,
+            height: size,
+            child: Icon(Icons.arrow_back_rounded,
+                size: 22, color: Palette.textPrimary),
           ),
         ),
       );
@@ -190,34 +202,51 @@ class DayNavStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // A tonal, rounded Material 3 Expressive block: the day sits centred as an
+    // emphasised title over its date, flanked by two circular tonal chip
+    // buttons — the same coloured-chip language as the Settings tiles.
     return Padding(
-      padding: const EdgeInsets.only(top: Metrics.space6),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          _NavArrow(
-              icon: Icons.chevron_left_rounded, enabled: canPrev, onTap: onPrev),
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(label.toUpperCase(),
-                  style: NoopType.overline.copyWith(
-                      color: Palette.textSecondary, letterSpacing: 1.4)),
-              Text(sub,
-                  style: NoopType.footnote
-                      .copyWith(color: Palette.textTertiary)),
-            ],
-          ),
-          _NavArrow(
-              icon: Icons.chevron_right_rounded,
-              enabled: canNext,
-              onTap: onNext),
-        ],
+      padding: const EdgeInsets.only(top: Metrics.space10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+            horizontal: Metrics.space8, vertical: Metrics.space8),
+        decoration: BoxDecoration(
+          color: Palette.fillRaised,
+          borderRadius: BorderRadius.circular(Metrics.cornerLarge),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            _NavArrow(
+                icon: Icons.chevron_left_rounded,
+                enabled: canPrev,
+                onTap: onPrev),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(label.toUpperCase(),
+                    style: NoopType.subhead.copyWith(
+                        color: Palette.textPrimary,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.2)),
+                Text(sub,
+                    style: NoopType.footnote
+                        .copyWith(color: Palette.textTertiary)),
+              ],
+            ),
+            _NavArrow(
+                icon: Icons.chevron_right_rounded,
+                enabled: canNext,
+                onTap: onNext),
+          ],
+        ),
       ),
     );
   }
 }
 
+/// A circular tonal chip button — the Expressive coloured-chip affordance the
+/// day pager uses to step days. Dimmed and disabled at the ends.
 class _NavArrow extends StatelessWidget {
   final IconData icon;
   final bool enabled;
@@ -225,15 +254,24 @@ class _NavArrow extends StatelessWidget {
   const _NavArrow({required this.icon, required this.enabled, this.onTap});
 
   @override
-  Widget build(BuildContext context) => IconButton(
-        onPressed: enabled ? onTap : null,
-        visualDensity: VisualDensity.compact,
-        icon: Icon(icon,
-            size: 22,
-            color: enabled
-                ? Palette.textSecondary
-                : Palette.textTertiary.withValues(alpha: 0.4)),
-      );
+  Widget build(BuildContext context) {
+    final fg = enabled
+        ? Palette.textPrimary
+        : Palette.textTertiary.withValues(alpha: 0.4);
+    return Material(
+      color: Palette.fillInset,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: enabled ? onTap : null,
+        child: SizedBox(
+          width: 36,
+          height: 36,
+          child: Icon(icon, size: 20, color: fg),
+        ),
+      ),
+    );
+  }
 }
 
 /// A circular icon button used in screen headers.

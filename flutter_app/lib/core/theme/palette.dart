@@ -20,13 +20,39 @@ class Palette {
   static bool get isClassic => chartStyle == ChartStyle.classic;
   static ClassicRamp get _classic => isLight ? classicLight : classicDark;
 
-  // Surfaces
+  // Surfaces (opaque tokens — the raw scheme colours)
   static Color get surfaceBase => active.surfaceBase;
   static Color get surfaceRaised => active.surfaceRaised;
   static Color get surfaceOverlay => active.surfaceOverlay;
   static Color get surfaceInset => active.surfaceInset;
   static Color get hairline => active.hairline;
   static Color get hairlineStrong => active.hairlineStrong;
+
+  // ── Global transparency — THE single editable knob ──────────────────────────
+  // One place to tune how see-through every *chrome* surface is (cards, tiles,
+  // pills, sheets, dialogs, controls). 1.0 = fully opaque; lower = more of the
+  // scenic background shows through, exactly like the floating nav bar. Change
+  // these two numbers (or set them at runtime) to restyle the whole app's
+  // translucency — every surface reads them through [chrome] / the `fill*`
+  // getters below, so nothing is styled one-off.
+  //
+  // Page/background fills (a full-screen [surfaceBase] canvas) must stay opaque
+  // and keep using the raw `surface*` tokens — only floating chrome uses `fill*`.
+  static double surfaceOpacityDark = 0.58;
+  static double surfaceOpacityLight = 0.74;
+  static double get surfaceOpacity =>
+      isLight ? surfaceOpacityLight : surfaceOpacityDark;
+
+  /// Make any solid surface colour translucent by the global [surfaceOpacity]
+  /// (or an explicit [opacity]). Route EVERY chrome fill through this.
+  static Color chrome(Color base, {double? opacity}) =>
+      base.withValues(alpha: opacity ?? surfaceOpacity);
+
+  /// Translucent variants of the surface tokens — the fills chrome should use
+  /// instead of the raw opaque `surface*` getters.
+  static Color get fillRaised => chrome(surfaceRaised);
+  static Color get fillOverlay => chrome(surfaceOverlay);
+  static Color get fillInset => chrome(surfaceInset);
 
   // Text
   static Color get textPrimary => active.textPrimary;

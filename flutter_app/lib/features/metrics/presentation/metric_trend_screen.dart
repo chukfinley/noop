@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 
 import 'package:noop/core/state/format.dart';
-import 'package:noop/shared/widgets/health_charts.dart';
+import 'package:noop/shared/widgets/cards.dart';
+import 'package:noop/shared/widgets/coming_soon.dart';
+import 'package:noop/shared/widgets/controls.dart';
+import 'package:noop/shared/widgets/health_charts.dart' show ghWeekdayInitial;
+import 'package:noop/shared/widgets/interactive_trend_chart.dart';
 import 'package:noop/shared/widgets/scaffold.dart';
 import 'package:noop/core/theme/metrics.dart';
 import 'package:noop/core/theme/palette.dart';
@@ -89,90 +93,105 @@ class _MetricTrendScreenState extends State<MetricTrendScreen> {
         ? ''
         : '${Fmt.shortDate(dates.first)} – ${Fmt.shortDate(dates.last)}';
 
-    return Scaffold(
-      backgroundColor: Palette.surfaceBase,
-      body: SafeArea(
-        child: Column(
+    // The SAME shared shell as every other metric detail screen — a
+    // ScenicBackground, the one CenteredHeader / back button, and the staggered
+    // Reveal enter — so a Trends sub-screen is byte-for-byte consistent with a
+    // Home metric detail (was a bespoke Scaffold + custom app bar before).
+    return ScreenScaffold(
+      title: m.title,
+      glow: m.color,
+      leadingHeader: CenteredHeader(title: m.title),
+      children: [
+        if (m.comingSoon) _comingSoonBanner(m),
+        _rangeTabs(),
+        // The date range + big average + chart + legend sit in their own
+        // translucent box (like the day-list tiles below), so the graph reads
+        // against a surface instead of floating straight on the scenic sky.
+        NoopCard(
+          squircle: true,
+          radius: Metrics.cornerHero,
+          bordered: false,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(rangeLabel,
+                  style: NoopType.title2.copyWith(color: Palette.textPrimary)),
+              const SizedBox(height: 16),
+              _bigValue(m, avg),
+              const SizedBox(height: 24),
+              InteractiveTrendChart(
+                values: values,
+                dates: dates,
+                labels: labels,
+                color: m.color,
+                kind: m.chart == TrendChart.bars
+                    ? TrendChartKind.bars
+                    : TrendChartKind.line,
+                targetLow: m.targetLow,
+                targetHigh: m.targetHigh,
+                fmt: m.fmt,
+                unit: m.unit,
+              ),
+              const SizedBox(height: 20),
+              _legend(),
+            ],
+          ),
+        ),
+        Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _appBar(context, m.title),
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-                children: [
-                  _rangeTabs(),
-                  const SizedBox(height: 20),
-                  Text(rangeLabel,
-                      style: NoopType.title2.copyWith(color: Palette.textPrimary)),
-                  const SizedBox(height: 16),
-                  _bigValue(m, avg),
-                  const SizedBox(height: 24),
-                  HealthDetailChart(
-                    values: values,
-                    labels: labels,
-                    color: m.color,
-                    kind: m.chart == TrendChart.bars
-                        ? HealthChartKind.bars
-                        : HealthChartKind.line,
-                    targetLow: m.targetLow,
-                    targetHigh: m.targetHigh,
-                  ),
-                  const SizedBox(height: 20),
-                  _legend(),
-                  const SizedBox(height: 28),
-                  Text(rangeLabel,
-                      style: NoopType.title2.copyWith(color: Palette.textPrimary)),
-                  const SizedBox(height: 12),
-                  _dayList(m, values, dates),
-                ],
-              ),
-            ),
+            Text(rangeLabel,
+                style: NoopType.title2.copyWith(color: Palette.textPrimary)),
+            const SizedBox(height: 12),
+            _dayList(m, values, dates),
           ],
         ),
-      ),
+      ],
     );
   }
 
-  Widget _appBar(BuildContext context, String title) => Padding(
-        padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
+  /// A small honest banner for metrics with no calibrated source yet: the whole
+  /// screen still renders (chart, average, day list) so the UI is complete, but
+  /// this makes clear the numbers are a rough estimate, not a trusted reading.
+  Widget _comingSoonBanner(TrendMetric m) => NoopCard(
+        squircle: true,
+        radius: Metrics.cornerLarge,
+        bordered: false,
+        padding: const EdgeInsets.all(Metrics.space14),
         child: Row(
           children: [
-            NoopBackButton(onTap: () => Navigator.of(context).maybePop()),
-            const SizedBox(width: 4),
+            Icon(Icons.schedule_rounded, size: 22, color: m.color),
+            const SizedBox(width: Metrics.space12),
             Expanded(
-              child: Text(title,
-                  style: NoopType.title2.copyWith(color: Palette.textPrimary)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Estimated preview',
+                      style: NoopType.subhead.copyWith(
+                          color: Palette.textPrimary,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  Text(
+                      'No calibrated ${m.title.toLowerCase()} source in the capture yet — these numbers are rough estimates.',
+                      style: NoopType.caption
+                          .copyWith(color: Palette.textTertiary)),
+                ],
+              ),
             ),
+            const SizedBox(width: Metrics.space8),
+            const ComingSoonBadge(compact: true),
           ],
         ),
       );
 
-  Widget _rangeTabs() => Row(
-        children: [
-          for (var i = 0; i < _ranges.length; i++) ...[
-            Expanded(
-              child: GestureDetector(
-                onTap: () => setState(() => _rangeIdx = i),
-                child: Container(
-                  alignment: Alignment.center,
-                  padding: const EdgeInsets.symmetric(vertical: 11),
-                  decoration: BoxDecoration(
-                    color: i == _rangeIdx
-                        ? Palette.accent.withValues(alpha: 0.28)
-                        : Palette.surfaceRaised,
-                    borderRadius: BorderRadius.circular(Metrics.cornerPill),
-                  ),
-                  child: Text(_ranges[i].label,
-                      style: NoopType.subhead.copyWith(
-                          color: i == _rangeIdx
-                              ? Palette.accent
-                              : Palette.textSecondary,
-                          fontWeight: FontWeight.w600)),
-                ),
-              ),
-            ),
-            if (i != _ranges.length - 1) const SizedBox(width: 8),
-          ],
+  Widget _rangeTabs() => NoopSegmented<int>(
+        expand: true,
+        height: 44,
+        value: _rangeIdx,
+        onChanged: (i) => setState(() => _rangeIdx = i),
+        segments: [
+          for (var i = 0; i < _ranges.length; i++)
+            NoopSegment(i, _ranges[i].label),
         ],
       );
 
@@ -220,42 +239,56 @@ class _MetricTrendScreenState extends State<MetricTrendScreen> {
       );
 
   Widget _dayList(TrendMetric m, List<double> values, List<DateTime> dates) {
-    // Newest first, up to 6 rows.
-    final rows = <Widget>[];
-    for (var i = values.length - 1; i >= 0 && rows.length < 6; i--) {
+    // Newest first — every day in the selected range (the range tabs decide how
+    // many), so you can scroll every other day, not just a handful.
+    final items = <(String, String)>[];
+    for (var i = values.length - 1; i >= 0; i--) {
       final isLast = i == values.length - 1;
       final isPrev = i == values.length - 2;
       final label = isLast
           ? 'Today'
           : (isPrev ? 'Yesterday' : Fmt.shortDate(dates[i]));
-      rows.add(Container(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 18),
-        decoration: BoxDecoration(
-          color: Palette.surfaceRaised,
-          borderRadius: BorderRadius.vertical(
-            top: rows.isEmpty
-                ? const Radius.circular(Metrics.cornerLarge)
-                : Radius.zero,
-          ),
-          border: Border(
-            bottom: BorderSide(color: Palette.surfaceBase, width: 2),
-          ),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(label,
-                  style: NoopType.body.copyWith(color: Palette.textSecondary)),
-            ),
-            Text(m.fmt(values[i]),
-                style: NoopType.number(22).copyWith(color: Palette.textPrimary)),
-          ],
-        ),
-      ));
+      items.add((label, m.fmt(values[i])));
     }
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(Metrics.cornerLarge),
-      child: Column(children: rows),
+
+    // The SAME connected-group language as the Settings menu: each entry is its
+    // own translucent tile; the group's outer corners are extra-large and the
+    // inner (touching) corners are small, with a hairline gap between rows — no
+    // divider lines.
+    const outer = Radius.circular(Metrics.cornerLarge);
+    const inner = Radius.circular(Metrics.cornerBadge);
+    final n = items.length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var i = 0; i < n; i++) ...[
+          Material(
+            color: Palette.fillRaised,
+            borderRadius: BorderRadius.vertical(
+              top: i == 0 ? outer : inner,
+              bottom: i == n - 1 ? outer : inner,
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: Metrics.space16, vertical: Metrics.space14),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(items[i].$1,
+                        style: NoopType.body
+                            .copyWith(color: Palette.textSecondary)),
+                  ),
+                  Text(items[i].$2,
+                      style: NoopType.number(22)
+                          .copyWith(color: Palette.textPrimary)),
+                ],
+              ),
+            ),
+          ),
+          if (i != n - 1) const SizedBox(height: 3),
+        ],
+      ],
     );
   }
 }

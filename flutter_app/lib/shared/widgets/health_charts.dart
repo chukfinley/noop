@@ -32,7 +32,7 @@ class _LabelStrip extends StatelessWidget {
                       height: 22,
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
-                        color: Palette.surfaceInset,
+                        color: Palette.fillInset,
                         shape: BoxShape.circle,
                       ),
                       child: Text(labels[i],

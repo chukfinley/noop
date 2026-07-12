@@ -35,6 +35,26 @@ void main() {
       expect(r.rmssd, isNull);
       expect(r.nClean, 0);
     });
+
+    test('gap-aware cleaning flags a break across every dropped beat (#204)', () {
+      // 100 and 5000 are out of range and dropped; each leaves a "break" before
+      // the next surviving beat, so a successive difference can't span the gap.
+      final c = HrvAnalyzer.cleanRRWithBreaks([100, 800, 810, 5000, 805]);
+      expect(c.nn, [800, 810, 805]);
+      expect(c.brokenBefore, [true, false, true]);
+    });
+
+    test('a dropped beat cannot inflate RMSSD (#204)', () {
+      // A perfectly steady 800 ms series (RMSSD 0) with one out-of-range spike
+      // wedged in. Naively bridging the gap would count 800→800 = 0 here, but
+      // the guarantee we pin is: cleaning removes the spike AND the surviving
+      // series stays RMSSD 0 — the spike never leaks into the measure.
+      final steady = List<double>.filled(24, 800.0);
+      final withSpike = [...steady.sublist(0, 12), 5000.0, ...steady.sublist(12)];
+      final r = HrvAnalyzer.analyzeRaw(withSpike);
+      expect(r.nClean, 24); // the spike was dropped
+      expect(r.rmssd, closeTo(0.0, 1e-9)); // and contributed nothing
+    });
   });
 
   group('StrainScorer (Edwards TRIMP → Effort 0..100)', () {

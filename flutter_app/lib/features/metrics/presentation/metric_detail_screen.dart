@@ -5,11 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:noop/core/data/models.dart';
 import 'package:noop/core/state/format.dart';
+import 'package:noop/core/state/prefs.dart' show EffortScale;
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/shared/widgets/behavior.dart';
 import 'package:noop/shared/widgets/cards.dart';
 import 'package:noop/shared/widgets/charts.dart';
 import 'package:noop/shared/widgets/common.dart';
+import 'package:noop/shared/widgets/controls.dart';
 import 'package:noop/shared/widgets/coming_soon.dart';
 import 'package:noop/shared/widgets/health_charts.dart';
 import 'package:noop/shared/widgets/liquid.dart';
@@ -21,6 +23,19 @@ import 'package:noop/features/sleep/presentation/sleep_screen.dart';
 
 /// Which hero metric a [MetricDetailScreen] presents.
 enum MetricKind { recovery, strain, sleep, stress }
+
+/// The windows the trend selector at the top of every detail screen offers —
+/// (label, days). Shared so Recovery/Strain/Sleep/Stress all read identically.
+const _trendRanges = <(String, int)>[
+  ('W', 7),
+  ('M', 14),
+  ('3M', 30),
+  ('Y', 90),
+];
+
+/// Selected trend window, shared across the detail screens (index into
+/// [_trendRanges]). Defaults to 'M' (14 days) — the old fixed window.
+final _trendRangeProvider = StateProvider<int>((_) => 1);
 
 /// A dense 0..100 timeline series (+ 3 time-axis labels) for a metric — the
 /// same jagged detail line the Today cards use, so tapping in keeps the look.
@@ -74,8 +89,12 @@ class MetricDetailScreen extends ConsumerWidget {
     List<double> tail(double Function(DayRecord) f, [int n = 14]) =>
         days.sublist(days.length - n).map(f).toList();
 
-    final spec = _specFor(kind, day);
-    final series = tail(spec.field);
+    final spec = _specFor(kind, day, ref.watch(effortScaleProvider));
+    // Windowed trend — the shared range selector picks how many days feed the
+    // chart, clamped to the data we actually have.
+    final rangeIdx = ref.watch(_trendRangeProvider).clamp(0, _trendRanges.length - 1);
+    final n = _trendRanges[rangeIdx].$2.clamp(1, days.length);
+    final series = tail(spec.field, n);
     final maxV = kind == MetricKind.strain
         ? (series.fold<double>(1, (m, v) => v > m ? v : m) * 1.15)
         : 100.0;
@@ -111,14 +130,31 @@ class MetricDetailScreen extends ConsumerWidget {
         // matching the Today "Your cards" surface.
         _TimelineCard(spec: spec, timeline: timeline, axis: axis),
         SectionCard(
-          title: '14-day trend',
+          title: 'Trend',
           accent: spec.color,
-          child: BarSeries(
-            values: series,
-            color: spec.color,
-            height: 150,
-            maxValue: maxV,
-            highlightIndex: series.length - 1,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              NoopSegmented<int>(
+                expand: true,
+                height: 40,
+                value: rangeIdx,
+                onChanged: (i) =>
+                    ref.read(_trendRangeProvider.notifier).state = i,
+                segments: [
+                  for (var i = 0; i < _trendRanges.length; i++)
+                    NoopSegment(i, _trendRanges[i].$1),
+                ],
+              ),
+              const SizedBox(height: Metrics.space16),
+              BarSeries(
+                values: series,
+                color: spec.color,
+                height: 150,
+                maxValue: maxV,
+                highlightIndex: series.length - 1,
+              ),
+            ],
           ),
         ),
         SectionCard(
@@ -222,7 +258,7 @@ class _TimelineRow extends StatelessWidget {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                     decoration: BoxDecoration(
-                      color: Palette.surfaceRaised,
+                      color: Palette.fillRaised,
                       borderRadius: BorderRadius.circular(Metrics.cornerBadge),
                       border: Border.all(
                           color: color.withValues(alpha: 0.5), width: 1),
@@ -287,7 +323,7 @@ class _HeroGauge extends ConsumerWidget {
             fraction: (spec.value / 100).clamp(0, 1),
             ramp: spec.ramp,
             size: 168,
-            center: Text(spec.value.round().toString(),
+            center: Text(spec.valueLabel ?? spec.value.round().toString(),
                 style: NoopType.number(52).copyWith(
                   color: gaugeCenterColor(style),
                   shadows: gaugeCenterShadows(style),
@@ -396,6 +432,11 @@ class _ContribRow extends StatelessWidget {
 class _Spec {
   final String title;
   final double value;
+
+  /// Optional pre-formatted hero number (e.g. Effort on the WHOOP 0..21 scale,
+  /// ryanbr #45). Falls back to `value.round()` when null. The gauge fill still
+  /// uses [value] on its native 0..100 scale.
+  final String? valueLabel;
   final List<Stop> ramp;
   final Color color;
   final String state;
@@ -405,6 +446,7 @@ class _Spec {
   const _Spec({
     required this.title,
     required this.value,
+    this.valueLabel,
     required this.ramp,
     required this.color,
     required this.state,
@@ -429,7 +471,7 @@ class _Contrib {
       {this.comingSoon = false});
 }
 
-_Spec _specFor(MetricKind kind, DayRecord day) {
+_Spec _specFor(MetricKind kind, DayRecord day, EffortScale effortScale) {
   switch (kind) {
     case MetricKind.recovery:
       return _Spec(
@@ -457,6 +499,7 @@ _Spec _specFor(MetricKind kind, DayRecord day) {
       return _Spec(
         title: 'Strain',
         value: s,
+        valueLabel: Fmt.effort(s, effortScale),
         ramp: Palette.effortGradientStops,
         color: Palette.effortColor,
         state: s < 33 ? 'Light' : (s < 66 ? 'Moderate' : 'Strenuous'),

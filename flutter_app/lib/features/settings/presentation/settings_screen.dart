@@ -1,43 +1,54 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:noop/core/data/weather.dart';
 import 'package:noop/core/state/prefs.dart';
 import 'package:noop/core/state/providers.dart';
+import 'package:noop/features/settings/presentation/location_settings_screen.dart';
 import 'package:noop/shared/widgets/behavior.dart';
+import 'package:noop/shared/widgets/cards.dart';
 import 'package:noop/shared/widgets/common.dart';
 import 'package:noop/shared/widgets/controls.dart';
 import 'package:noop/shared/widgets/scaffold.dart';
+import 'package:noop/shared/widgets/settings_tiles.dart';
 import 'package:noop/core/theme/metrics.dart';
 import 'package:noop/core/theme/noop_theme.dart';
 import 'package:noop/core/theme/palette.dart';
 
 // ── Local UI state (display toggles) ────────────────────────────────────────
 // File-level StateProviders keep [SettingsScreen] a plain ConsumerWidget while
-// letting the switches visibly flip. None of these persist — they are session
-// UI state only.
-final _tempFahrenheit = StateProvider<bool>((_) => false);
-final _keepConnected = StateProvider<bool>((_) => true);
-final _continuousHrv = StateProvider<bool>((_) => true);
-final _illnessWatch = StateProvider<bool>((_) => true);
-final _hydrationReminders = StateProvider<bool>((_) => false);
-final _autoDetectWorkouts = StateProvider<bool>((_) => true);
-final _keepScreenOn = StateProvider<bool>((_) => false);
+// letting the switches visibly flip. Each is seeded from persisted [Prefs]
+// (per-key default) and written back on change, so every toggle survives a
+// restart.
+bool _tog(String k, bool def) => Prefs.instance.toggles[k] ?? def;
+final _keepConnected = StateProvider<bool>((_) => _tog('keep_connected', true));
+final _continuousHrv = StateProvider<bool>((_) => _tog('continuous_hrv', true));
+final _illnessWatch = StateProvider<bool>((_) => _tog('illness_watch', true));
+final _hydrationReminders =
+    StateProvider<bool>((_) => _tog('hydration_reminders', false));
+final _autoDetectWorkouts =
+    StateProvider<bool>((_) => _tog('auto_detect_workouts', true));
+final _keepScreenOn = StateProvider<bool>((_) => _tog('keep_screen_on', false));
 
-// Editable profile fields — seeded null, fall back to the repository profile
-// until the user changes them.
-final _weightKg = StateProvider<double?>((_) => null);
-final _heightCm = StateProvider<double?>((_) => null);
-final _hrMax = StateProvider<int?>((_) => null);
-final _metric = StateProvider<bool?>((_) => null);
+/// Flip a persisted toggle: update its provider and write it through to storage.
+void _setTog(WidgetRef ref, StateProvider<bool> p, String key, bool v) {
+  ref.read(p.notifier).state = v;
+  Prefs.instance.setToggle(key, v);
+}
+
+// Editable body-profile fields live in [bodyWeightProvider] / [bodyHeightProvider]
+// / [hrMaxProvider] / [metricProvider] (providers.dart) — persisted and applied
+// to [profileProvider], so a change actually sticks and feeds the rest of the app.
 
 /// App settings, rebuilt in the Material 3 Expressive idiom: a prominent tonal
 /// profile card, bold coloured group headers, and *connected* grouped lists —
 /// each row is its own filled tile whose outer corners are extra-large and
 /// inner (touching) corners are small, separated by a hairline gap.
 ///
-/// The animated controls stay: every on/off uses [_Toggle] (the nav-bar pill
-/// with a sliding highlight) and every segmented choice uses [_PillGroup] (the
-/// gliding segmented control). Riverpod remains the single source of truth.
+/// The animated controls stay: every on/off uses [NoopToggle] (the nav-bar pill
+/// with a sliding highlight) and every segmented choice uses [NoopSegmented]
+/// (the shared gliding segmented control). Riverpod remains the single source
+/// of truth.
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
@@ -63,6 +74,8 @@ class SettingsScreen extends ConsumerWidget {
             Palette.chargeColor, const _WellnessSettings()),
       ],
       [
+        ('AI estimator', 'Food-photo calories (your key)',
+            Icons.auto_awesome_rounded, Palette.effortColor, const _AiSettings()),
         ('Data', 'Backup & sync', Icons.cloud_rounded, Palette.metricCyan,
             const _DataSettings()),
         ('About', "Version & what's new", Icons.info_rounded,
@@ -70,31 +83,38 @@ class SettingsScreen extends ConsumerWidget {
       ],
     ];
 
+    // One Column so ScreenScaffold's screenRowSpacing isn't inserted between
+    // every group — we own the (tighter) inter-group gap ourselves.
     return ScreenScaffold(
       title: 'Settings',
       children: [
-        for (final g in groups) ...[
-          _ConnectedGroup([
-            for (final r in g)
-              (radius) => _Tile(
-                    radius: radius,
-                    icon: r.$3,
-                    iconColor: r.$4,
-                    title: r.$1,
-                    detail: r.$2,
-                    trailing: Icon(Icons.chevron_right_rounded,
-                        color: Palette.textTertiary, size: 20),
-                    onTap: () => Navigator.of(context).push(noopRoute(r.$5)),
-                  ),
-          ]),
-          const SizedBox(height: Metrics.space12),
-        ],
-        Padding(
-          padding: const EdgeInsets.only(top: Metrics.space8),
-          child: Center(
-            child: Text('Recovery · sleep · strain',
-                style: NoopType.footnote.copyWith(color: Palette.textTertiary)),
-          ),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var gi = 0; gi < groups.length; gi++) ...[
+              ConnectedGroup([
+                for (final r in groups[gi])
+                  (radius) => SettingsTile(
+                        radius: radius,
+                        icon: r.$3,
+                        iconColor: r.$4,
+                        title: r.$1,
+                        detail: r.$2,
+                        onTap: () => Navigator.of(context).push(noopRoute(r.$5)),
+                      ),
+              ]),
+              if (gi != groups.length - 1)
+                const SizedBox(height: Metrics.space12),
+            ],
+            Padding(
+              padding: const EdgeInsets.only(top: Metrics.space16),
+              child: Center(
+                child: Text('Recovery · sleep · strain',
+                    style:
+                        NoopType.footnote.copyWith(color: Palette.textTertiary)),
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -123,7 +143,7 @@ Future<void> _editNumber(
   final result = await showDialog<double>(
     context: context,
     builder: (ctx) => AlertDialog(
-      backgroundColor: Palette.surfaceRaised,
+      backgroundColor: Palette.fillRaised,
       title: Text(title,
           style: NoopType.title2.copyWith(color: Palette.textPrimary)),
       content: TextField(
@@ -160,12 +180,12 @@ class _BodySettings extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final profile = ref.watch(profileProvider);
-    final w = ref.watch(_weightKg) ?? profile.weightKg;
-    final h = ref.watch(_heightCm) ?? profile.heightCm;
-    final hr = ref.watch(_hrMax) ?? profile.hrMaxOverride;
+    final w = ref.watch(bodyWeightProvider) ?? profile.weightKg;
+    final h = ref.watch(bodyHeightProvider) ?? profile.heightCm;
+    final hr = ref.watch(hrMaxProvider) ?? profile.hrMaxOverride;
     return ScreenScaffold(title: 'Body', children: [
-      _ConnectedGroup([
-        (r) => _Tile(
+      ConnectedGroup([
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.monitor_weight_rounded,
               iconColor: Palette.accent,
@@ -177,9 +197,12 @@ class _BodySettings extends ConsumerWidget {
                   value: w,
                   min: 30,
                   max: 300,
-                  onSet: (v) => ref.read(_weightKg.notifier).state = v),
+                  onSet: (v) {
+                    ref.read(bodyWeightProvider.notifier).state = v;
+                    Prefs.instance.setBodyWeight(v);
+                  }),
             ),
-        (r) => _Tile(
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.height_rounded,
               iconColor: Palette.accent,
@@ -191,9 +214,12 @@ class _BodySettings extends ConsumerWidget {
                   value: h,
                   min: 100,
                   max: 250,
-                  onSet: (v) => ref.read(_heightCm.notifier).state = v),
+                  onSet: (v) {
+                    ref.read(bodyHeightProvider.notifier).state = v;
+                    Prefs.instance.setBodyHeight(v);
+                  }),
             ),
-        (r) => _Tile(
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.favorite_rounded,
               iconColor: Palette.metricRose,
@@ -206,7 +232,10 @@ class _BodySettings extends ConsumerWidget {
                   value: (hr ?? 190).toDouble(),
                   min: 120,
                   max: 230,
-                  onSet: (v) => ref.read(_hrMax.notifier).state = v.round()),
+                  onSet: (v) {
+                    ref.read(hrMaxProvider.notifier).state = v.round();
+                    Prefs.instance.setHrMaxOverride(v.round());
+                  }),
             ),
       ]),
     ]);
@@ -218,10 +247,10 @@ class _UnitsSettings extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final profile = ref.watch(profileProvider);
-    final metric = ref.watch(_metric) ?? profile.metric;
+    final metric = ref.watch(metricProvider) ?? profile.metric;
     return ScreenScaffold(title: 'Units', children: [
-      _ConnectedGroup([
-        (r) => _Tile(
+      ConnectedGroup([
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.straighten_rounded,
               iconColor: Palette.metricCyan,
@@ -229,17 +258,44 @@ class _UnitsSettings extends ConsumerWidget {
               detail: metric ? 'Metric' : 'Imperial',
               trailing: NoopToggle(
                   value: metric,
-                  onChanged: (v) => ref.read(_metric.notifier).state = v),
+                  onChanged: (v) {
+                    ref.read(metricProvider.notifier).state = v;
+                    Prefs.instance.setMetric(v);
+                  }),
             ),
-        (r) => _Tile(
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.thermostat_rounded,
               iconColor: Palette.metricCyan,
               title: 'Temperature',
-              trailing: _PillGroup<bool>(
-                options: const [(false, '°C'), (true, '°F')],
-                value: ref.watch(_tempFahrenheit),
-                onChanged: (v) => ref.read(_tempFahrenheit.notifier).state = v,
+              trailing: NoopSegmented<bool>(
+                segments: const [
+                  NoopSegment(false, '°C'),
+                  NoopSegment(true, '°F'),
+                ],
+                value: ref.watch(fahrenheitProvider),
+                onChanged: (v) {
+                  ref.read(fahrenheitProvider.notifier).state = v;
+                  Prefs.instance.setFahrenheit(v);
+                },
+              ),
+            ),
+        (r) => SettingsTile(
+              radius: r,
+              icon: Icons.bolt_rounded,
+              iconColor: Palette.effortColor,
+              title: 'Effort scale',
+              detail: 'How day strain is shown',
+              trailing: NoopSegmented<EffortScale>(
+                segments: const [
+                  NoopSegment(EffortScale.hundred, '0–100'),
+                  NoopSegment(EffortScale.whoop, '0–21'),
+                ],
+                value: ref.watch(effortScaleProvider),
+                onChanged: (v) {
+                  ref.read(effortScaleProvider.notifier).state = v;
+                  Prefs.instance.setEffortScale(v);
+                },
               ),
             ),
       ]),
@@ -254,47 +310,73 @@ class _AppearanceSettings extends ConsumerWidget {
     final appearance = ref.watch(appearanceProvider);
     final chartStyle = ref.watch(chartStyleProvider);
     final gaugeStyle = ref.watch(gaugeStyleProvider);
+    final loc = ref.watch(weatherLocationProvider);
+    final wallUrl = ref.watch(wallpaperUrlProvider);
     return ScreenScaffold(title: 'Appearance', children: [
-      _ConnectedGroup([
-        (r) => _Tile(
+      ConnectedGroup([
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.brightness_6_rounded,
               iconColor: Palette.metricPurple,
               title: 'Theme',
               detail: 'How the app adapts to your device',
-              trailing: _PillGroup<AppearanceMode>(
-                options: [for (final m in AppearanceMode.values) (m, m.label)],
+              trailing: NoopSegmented<AppearanceMode>(
+                segments: [
+                  for (final m in AppearanceMode.values) NoopSegment(m, m.label),
+                ],
                 value: appearance,
-                onChanged: (m) =>
-                    ref.read(appearanceProvider.notifier).state = m,
+                onChanged: (m) {
+                  ref.read(appearanceProvider.notifier).state = m;
+                  Prefs.instance.setAppearanceMode(m.name);
+                },
               ),
             ),
-        (r) => _Tile(
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.palette_rounded,
               iconColor: Palette.metricPurple,
               title: 'Chart colours',
               detail: 'Palette used across graphs',
-              trailing: _PillGroup<ChartStyle>(
-                options: const [
-                  (ChartStyle.titanium, 'Titanium'),
-                  (ChartStyle.classic, 'Classic'),
+              trailing: NoopSegmented<ChartStyle>(
+                segments: const [
+                  NoopSegment(ChartStyle.titanium, 'Titanium'),
+                  NoopSegment(ChartStyle.classic, 'Classic'),
                 ],
                 value: chartStyle,
-                onChanged: (s) =>
-                    ref.read(chartStyleProvider.notifier).state = s,
+                onChanged: (s) {
+                  ref.read(chartStyleProvider.notifier).state = s;
+                  Prefs.instance.setChartStyle(s.name);
+                },
               ),
             ),
-        (r) => _Tile(
+        (r) => SettingsTile(
+              radius: r,
+              icon: Icons.bar_chart_rounded,
+              iconColor: Palette.metricPurple,
+              title: 'Trend graphs',
+              detail: 'Bars or a line',
+              trailing: NoopSegmented<bool>(
+                segments: const [
+                  NoopSegment(false, 'Line'),
+                  NoopSegment(true, 'Bars'),
+                ],
+                value: ref.watch(trendsBarsProvider),
+                onChanged: (v) {
+                  ref.read(trendsBarsProvider.notifier).state = v;
+                  Prefs.instance.setTrendsBars(v);
+                },
+              ),
+            ),
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.blur_circular_rounded,
               iconColor: Palette.metricPurple,
               title: 'Score dials',
               detail: 'Liquid vessel or a classic arc ring',
-              trailing: _PillGroup<GaugeStyle>(
-                options: const [
-                  (GaugeStyle.liquid, 'Water'),
-                  (GaugeStyle.ring, 'Ring'),
+              trailing: NoopSegmented<GaugeStyle>(
+                segments: const [
+                  NoopSegment(GaugeStyle.liquid, 'Water'),
+                  NoopSegment(GaugeStyle.ring, 'Ring'),
                 ],
                 value: gaugeStyle,
                 onChanged: (s) {
@@ -303,8 +385,117 @@ class _AppearanceSettings extends ConsumerWidget {
                 },
               ),
             ),
+        (r) => SettingsTile(
+              radius: r,
+              icon: Icons.location_on_rounded,
+              iconColor: Palette.metricCyan,
+              title: 'Weather location',
+              detail: (loc != null && loc.name.isNotEmpty)
+                  ? loc.name
+                  : 'Automatic',
+              trailing: Icon(Icons.chevron_right_rounded,
+                  color: Palette.textTertiary, size: 20),
+              onTap: () => Navigator.of(context)
+                  .push(noopRoute(const LocationSettingsScreen())),
+            ),
+        (r) => SettingsTile(
+              radius: r,
+              icon: Icons.wallpaper_rounded,
+              iconColor: Palette.metricPurple,
+              title: 'Home wallpaper',
+              detail: 'Show a photo behind the home screen',
+              trailing: NoopToggle(
+                value: ref.watch(wallpaperProvider),
+                onChanged: (v) {
+                  ref.read(wallpaperProvider.notifier).state = v;
+                  Prefs.instance.setWallpaper(v);
+                },
+              ),
+            ),
+        (r) => SettingsTile(
+              radius: r,
+              icon: Icons.image_rounded,
+              iconColor: Palette.metricPurple,
+              title: 'Wallpaper image',
+              detail: (wallUrl != null && wallUrl.isNotEmpty)
+                  ? wallUrl
+                  : 'Bundled photo · tap to use any image URL',
+              trailing: Icon(Icons.chevron_right_rounded,
+                  color: Palette.textTertiary, size: 20),
+              onTap: () => _editWallpaperUrl(context, ref, wallUrl),
+            ),
       ]),
     ]);
+  }
+}
+
+/// Set a custom wallpaper image URL (any jpg/png/webp). Saving a non-empty URL
+/// also switches the wallpaper on; "Use default" clears it back to the asset.
+Future<void> _editWallpaperUrl(
+    BuildContext context, WidgetRef ref, String? current) async {
+  final ctrl = TextEditingController(text: current ?? '');
+  // Recommended minimum resolution: the wallpaper spans all four tabs and pans
+  // as you swipe, so it wants to be roughly the screen's pixel size × the number
+  // of tabs wide to stay crisp on this device.
+  const tabs = 4;
+  final mq = MediaQuery.of(context);
+  final wPx = (mq.size.width * mq.devicePixelRatio).round();
+  final hPx = (mq.size.height * mq.devicePixelRatio).round();
+  final recW = wPx * tabs;
+  final result = await showDialog<String?>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: Palette.fillRaised,
+      title: Text('Wallpaper image',
+          style: NoopType.title2.copyWith(color: Palette.textPrimary)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Paste a link to any image (jpg, png, webp). It is downloaded and '
+            'shown behind the home.',
+            style: NoopType.caption.copyWith(color: Palette.textTertiary),
+          ),
+          const SizedBox(height: Metrics.space8),
+          Text(
+            'For a crisp backdrop across all $tabs tabs on this phone, use an '
+            'image at least $recW×$hPx px (about $tabs screens wide).',
+            style: NoopType.caption.copyWith(color: Palette.accent),
+          ),
+          const SizedBox(height: Metrics.space12),
+          TextField(
+            controller: ctrl,
+            autofocus: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            keyboardType: TextInputType.url,
+            style: NoopType.body.copyWith(color: Palette.textPrimary),
+            decoration: const InputDecoration(hintText: 'https://…'),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, ''),
+          child: Text('Use default',
+              style: NoopType.body.copyWith(color: Palette.textSecondary)),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+          child: const Text('Save'),
+        ),
+      ],
+    ),
+  );
+  if (result == null) return; // dismissed
+  final url = result.isEmpty ? null : result;
+  ref.read(wallpaperUrlProvider.notifier).state = url;
+  await Prefs.instance.setWallpaperUrl(url);
+  if (url != null) {
+    // A custom image is only visible with the wallpaper on — enable it.
+    ref.read(wallpaperProvider.notifier).state = true;
+    await Prefs.instance.setWallpaper(true);
   }
 }
 
@@ -313,8 +504,8 @@ class _StrapSettings extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return ScreenScaffold(title: 'Strap', children: [
-      _ConnectedGroup([
-        (r) => _Tile(
+      ConnectedGroup([
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.bluetooth_connected_rounded,
               iconColor: Palette.effortColor,
@@ -324,7 +515,7 @@ class _StrapSettings extends ConsumerWidget {
                   style:
                       NoopType.body.copyWith(color: Palette.statusPositive)),
             ),
-        (r) => _Tile(
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.sync_rounded,
               iconColor: Palette.effortColor,
@@ -332,10 +523,11 @@ class _StrapSettings extends ConsumerWidget {
               detail: 'Maintain sync while the app is closed',
               trailing: NoopToggle(
                 value: ref.watch(_keepConnected),
-                onChanged: (v) => ref.read(_keepConnected.notifier).state = v,
+                onChanged: (v) =>
+                    _setTog(ref, _keepConnected, 'keep_connected', v),
               ),
             ),
-        (r) => _Tile(
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.monitor_heart_rounded,
               iconColor: Palette.effortColor,
@@ -343,7 +535,30 @@ class _StrapSettings extends ConsumerWidget {
               detail: 'Sample HRV throughout the day',
               trailing: NoopToggle(
                 value: ref.watch(_continuousHrv),
-                onChanged: (v) => ref.read(_continuousHrv.notifier).state = v,
+                onChanged: (v) =>
+                    _setTog(ref, _continuousHrv, 'continuous_hrv', v),
+              ),
+            ),
+        (r) => SettingsTile(
+              radius: r,
+              icon: Icons.bedtime_rounded,
+              iconColor: Palette.effortColor,
+              title: 'HRV window',
+              detail: ref.watch(hrvWindowProvider) == HrvWindow.deepSleep
+                  ? 'Deep sleep (WHOOP-comparable) · applies on restart'
+                  : 'Whole night (default)',
+              trailing: NoopSegmented<HrvWindow>(
+                segments: const [
+                  NoopSegment(HrvWindow.wholeNight, 'Night'),
+                  NoopSegment(HrvWindow.deepSleep, 'Deep'),
+                ],
+                value: ref.watch(hrvWindowProvider),
+                onChanged: (v) {
+                  ref.read(hrvWindowProvider.notifier).state = v;
+                  Prefs.instance.setHrvWindow(v);
+                  noopToast(context,
+                      'HRV window saved — re-scores on next launch');
+                },
               ),
             ),
       ]),
@@ -356,8 +571,8 @@ class _WellnessSettings extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return ScreenScaffold(title: 'Health & wellness', children: [
-      _ConnectedGroup([
-        (r) => _Tile(
+      ConnectedGroup([
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.sick_rounded,
               iconColor: Palette.chargeColor,
@@ -365,32 +580,33 @@ class _WellnessSettings extends ConsumerWidget {
               detail: 'Flag elevated skin temp & respiratory rate',
               trailing: NoopToggle(
                 value: ref.watch(_illnessWatch),
-                onChanged: (v) => ref.read(_illnessWatch.notifier).state = v,
+                onChanged: (v) =>
+                    _setTog(ref, _illnessWatch, 'illness_watch', v),
               ),
             ),
-        (r) => _Tile(
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.water_drop_rounded,
               iconColor: Palette.metricCyan,
               title: 'Hydration reminders',
               trailing: NoopToggle(
                 value: ref.watch(_hydrationReminders),
-                onChanged: (v) =>
-                    ref.read(_hydrationReminders.notifier).state = v,
+                onChanged: (v) => _setTog(
+                    ref, _hydrationReminders, 'hydration_reminders', v),
               ),
             ),
-        (r) => _Tile(
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.directions_run_rounded,
               iconColor: Palette.effortColor,
               title: 'Auto-detect workouts',
               trailing: NoopToggle(
                 value: ref.watch(_autoDetectWorkouts),
-                onChanged: (v) =>
-                    ref.read(_autoDetectWorkouts.notifier).state = v,
+                onChanged: (v) => _setTog(
+                    ref, _autoDetectWorkouts, 'auto_detect_workouts', v),
               ),
             ),
-        (r) => _Tile(
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.screen_lock_portrait_rounded,
               iconColor: Palette.textSecondary,
@@ -398,10 +614,112 @@ class _WellnessSettings extends ConsumerWidget {
               detail: 'While viewing live metrics',
               trailing: NoopToggle(
                 value: ref.watch(_keepScreenOn),
-                onChanged: (v) => ref.read(_keepScreenOn.notifier).state = v,
+                onChanged: (v) =>
+                    _setTog(ref, _keepScreenOn, 'keep_screen_on', v),
               ),
             ),
       ]),
+    ]);
+  }
+}
+
+/// AI food-photo estimator — bring-your-own OpenAI-compatible key (OpenAI or
+/// xAI Grok). The key is a secret stored only in secure storage; the request
+/// goes device→provider, so the user pays for their own usage.
+class _AiSettings extends ConsumerStatefulWidget {
+  const _AiSettings();
+  @override
+  ConsumerState<_AiSettings> createState() => _AiSettingsState();
+}
+
+class _AiSettingsState extends ConsumerState<_AiSettings> {
+  late final TextEditingController _key =
+      TextEditingController(text: Prefs.instance.aiApiKey ?? '');
+  late final TextEditingController _base =
+      TextEditingController(text: Prefs.instance.aiBaseUrl);
+  late final TextEditingController _model =
+      TextEditingController(text: Prefs.instance.aiModel);
+  bool _obscure = true;
+
+  @override
+  void dispose() {
+    _key.dispose();
+    _base.dispose();
+    _model.dispose();
+    super.dispose();
+  }
+
+  Widget _field(TextEditingController c, String label,
+      {bool obscure = false, Widget? suffix}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Metrics.space12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label,
+              style: NoopType.caption.copyWith(color: Palette.textTertiary)),
+          const SizedBox(height: Metrics.space4),
+          TextField(
+            controller: c,
+            obscureText: obscure,
+            autocorrect: false,
+            enableSuggestions: false,
+            style: NoopType.body.copyWith(color: Palette.textPrimary),
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: Palette.surfaceRaised,
+              suffixIcon: suffix,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(Metrics.cornerCard),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ScreenScaffold(title: 'AI estimator', children: [
+      NoopCard(
+        padding: const EdgeInsets.all(Metrics.space16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Estimate calories from a meal photo. Works with any '
+              'OpenAI-compatible endpoint — OpenAI or xAI Grok. Your key stays '
+              'on this device and is only sent to the provider you choose; '
+              'usage is billed to your own account.',
+              style: NoopType.body.copyWith(color: Palette.textSecondary),
+            ),
+            const SizedBox(height: Metrics.space16),
+            _field(_key, 'API key',
+                obscure: _obscure,
+                suffix: IconButton(
+                  icon: Icon(
+                      _obscure
+                          ? Icons.visibility_rounded
+                          : Icons.visibility_off_rounded,
+                      size: 20,
+                      color: Palette.textTertiary),
+                  onPressed: () => setState(() => _obscure = !_obscure),
+                )),
+            _field(_base, 'Base URL (e.g. https://api.openai.com/v1 · Grok: https://api.x.ai/v1)'),
+            _field(_model, 'Model (e.g. gpt-4o-mini · Grok: grok-2-vision-1212)'),
+            NoopButton('Save', icon: Icons.check_rounded, onPressed: () async {
+              await Prefs.instance.setAiConfig(
+                  _key.text.trim(), _base.text.trim(), _model.text.trim());
+              if (context.mounted) {
+                noopToast(context, 'AI settings saved',
+                    kind: ToastKind.success);
+              }
+            }),
+          ],
+        ),
+      ),
     ]);
   }
 }
@@ -411,8 +729,8 @@ class _DataSettings extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ScreenScaffold(title: 'Data', children: [
-      _ConnectedGroup([
-        (r) => _Tile(
+      ConnectedGroup([
+        (r) => SettingsTile(
               radius: r,
               icon: Icons.cloud_sync_rounded,
               iconColor: Palette.metricCyan,
@@ -433,8 +751,8 @@ class _AboutScreen extends StatelessWidget {
   Widget build(BuildContext context) => ScreenScaffold(
         title: 'About',
         children: [
-          _SettingsGroup('App', Palette.textSecondary, [
-            (r) => _Tile(
+          SettingsGroup('App', Palette.textSecondary, [
+            (r) => SettingsTile(
                   radius: r,
                   icon: Icons.info_rounded,
                   iconColor: Palette.textSecondary,
@@ -443,7 +761,7 @@ class _AboutScreen extends StatelessWidget {
                       style: NoopType.body
                           .copyWith(color: Palette.textSecondary)),
                 ),
-            (r) => _Tile(
+            (r) => SettingsTile(
                   radius: r,
                   icon: Icons.auto_awesome_rounded,
                   iconColor: Palette.gold,
@@ -455,222 +773,4 @@ class _AboutScreen extends StatelessWidget {
       );
 }
 
-// ── Grouping primitives ─────────────────────────────────────────────────────
-
-/// An emphasised, coloured group header — the bold accent label that sits above
-/// each connected group in the Expressive style.
-class _GroupHeader extends StatelessWidget {
-  final String title;
-  final Color color;
-  const _GroupHeader(this.title, this.color);
-
-  @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(
-            left: Metrics.space6, bottom: Metrics.space10),
-        child: Text(
-          title,
-          style: NoopType.headline
-              .copyWith(color: color, fontWeight: FontWeight.w800, letterSpacing: 0.2),
-        ),
-      );
-}
-
-/// A group = a coloured header above a [_ConnectedGroup] of filled tiles.
-class _SettingsGroup extends StatelessWidget {
-  final String title;
-  final Color color;
-  final List<Widget Function(BorderRadius radius)> tiles;
-  const _SettingsGroup(this.title, this.color, this.tiles);
-
-  @override
-  Widget build(BuildContext context) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _GroupHeader(title, color),
-          _ConnectedGroup(tiles),
-        ],
-      );
-}
-
-/// A *connected* list: each tile builder is handed the [BorderRadius] it should
-/// wear so the group's OUTER corners are extra-large and the INNER touching
-/// corners are small, with a thin gap between rows — the Material 3 Expressive
-/// grouped-list shape.
-class _ConnectedGroup extends StatelessWidget {
-  final List<Widget Function(BorderRadius radius)> tiles;
-  const _ConnectedGroup(this.tiles);
-
-  static const double _outer = Metrics.cornerLarge;
-  static const double _inner = Metrics.cornerBadge;
-  static const double _gap = 3;
-
-  @override
-  Widget build(BuildContext context) {
-    final n = tiles.length;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (var i = 0; i < n; i++) ...[
-          tiles[i](BorderRadius.vertical(
-            top: Radius.circular(i == 0 ? _outer : _inner),
-            bottom: Radius.circular(i == n - 1 ? _outer : _inner),
-          )),
-          if (i != n - 1) const SizedBox(height: _gap),
-        ],
-      ],
-    );
-  }
-}
-
-// ── Row / tile primitives ───────────────────────────────────────────────────
-
-/// A single filled setting tile: a leading tonal icon chip, a title (+ optional
-/// detail line) and a trailing control. Its own filled surface, shaped by the
-/// [radius] the connected group hands it. Tappable when [onTap] is supplied.
-class _Tile extends StatelessWidget {
-  final BorderRadius radius;
-  final IconData? icon;
-  final Color? iconColor;
-  final String title;
-  final String? detail;
-  final Widget? trailing;
-  final VoidCallback? onTap;
-  const _Tile({
-    required this.radius,
-    this.icon,
-    this.iconColor,
-    required this.title,
-    this.detail,
-    this.trailing,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color = iconColor ?? Palette.accent;
-    final content = Padding(
-      padding: const EdgeInsets.symmetric(
-          horizontal: Metrics.space14, vertical: Metrics.space10),
-      child: Row(
-        children: [
-          if (icon != null) ...[
-            IconChip(icon!, color: color),
-            const SizedBox(width: Metrics.space12),
-          ],
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title,
-                    style: NoopType.body.copyWith(
-                        color: Palette.textPrimary,
-                        fontWeight: FontWeight.w500)),
-                if (detail != null) ...[
-                  const SizedBox(height: 2),
-                  Text(detail!,
-                      style: NoopType.caption
-                          .copyWith(color: Palette.textTertiary)),
-                ],
-              ],
-            ),
-          ),
-          if (trailing != null) ...[
-            const SizedBox(width: Metrics.space12),
-            trailing!,
-          ],
-        ],
-      ),
-    );
-    return Material(
-      color: Palette.surfaceRaised,
-      borderRadius: radius,
-      clipBehavior: Clip.antiAlias,
-      child: onTap == null ? content : InkWell(onTap: onTap, child: content),
-    );
-  }
-}
-
-/// A segmented control with a single highlight that *glides* between options —
-/// the same slide mechanic as the bottom nav bar (equal slots, easeOutCubic).
-class _PillGroup<T> extends StatelessWidget {
-  final List<(T, String)> options;
-  final T value;
-  final ValueChanged<T> onChanged;
-  const _PillGroup({
-    required this.options,
-    required this.value,
-    required this.onChanged,
-  });
-
-  static const _height = 30.0;
-  static const _slide = Duration(milliseconds: 340);
-  static const _curve = Curves.easeOutCubic;
-
-  @override
-  Widget build(BuildContext context) {
-    final radius = BorderRadius.circular(Metrics.cornerPill);
-    final n = options.length;
-    // Equal slot width sized to the widest label so the highlight glides evenly.
-    var maxLabel = 0.0;
-    for (final (_, label) in options) {
-      final tp = TextPainter(
-        text: TextSpan(text: label, style: NoopType.caption),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      if (tp.width > maxLabel) maxLabel = tp.width;
-    }
-    final slotW = maxLabel + Metrics.space12 * 2;
-    final idx = options.indexWhere((o) => o.$1 == value).clamp(0, n - 1);
-    final alignX = n <= 1 ? 0.0 : -1 + 2 * idx / (n - 1);
-
-    return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(color: Palette.surfaceInset, borderRadius: radius),
-      child: SizedBox(
-        width: slotW * n,
-        height: _height,
-        child: Stack(
-          children: [
-            // The one highlight that slides between slots.
-            AnimatedAlign(
-              alignment: Alignment(alignX, 0),
-              duration: _slide,
-              curve: _curve,
-              child: FractionallySizedBox(
-                widthFactor: 1 / n,
-                heightFactor: 1,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(color: Palette.accent, borderRadius: radius),
-                ),
-              ),
-            ),
-            Row(
-              children: [
-                for (var i = 0; i < n; i++)
-                  SizedBox(
-                    width: slotW,
-                    child: GestureDetector(
-                      onTap: () => onChanged(options[i].$1),
-                      behavior: HitTestBehavior.opaque,
-                      child: Center(
-                        child: AnimatedDefaultTextStyle(
-                          duration: _slide,
-                          curve: _curve,
-                          style: NoopType.caption.copyWith(
-                            color: i == idx ? Palette.surfaceBase : Palette.textSecondary,
-                          ),
-                          child: Text(options[i].$2),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
 

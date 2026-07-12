@@ -59,6 +59,11 @@ class LiquidVessel extends StatefulWidget {
   final bool animate;
   final bool showRim;
 
+  /// Rotation (radians) applied to the liquid so its surface levels to gravity —
+  /// fed the device's in-plane roll angle so the "water" reacts to how the phone
+  /// is turned (full 360°). 0 keeps it flat.
+  final double tiltAngle;
+
   const LiquidVessel({
     super.key,
     required this.fraction,
@@ -67,6 +72,7 @@ class LiquidVessel extends StatefulWidget {
     this.center,
     this.animate = true,
     this.showRim = true,
+    this.tiltAngle = 0,
   });
 
   @override
@@ -114,7 +120,8 @@ class _LiquidVesselState extends State<LiquidVessel>
           final now = _c.lastElapsedDuration?.inMicroseconds ?? 0;
           _sim.step(now / 1e6);
           return CustomPaint(
-            painter: _VesselPainter(_sim, tint, widget.showRim),
+            painter:
+                _VesselPainter(_sim, tint, widget.tiltAngle, widget.showRim),
             child: child,
           );
         },
@@ -127,8 +134,9 @@ class _LiquidVesselState extends State<LiquidVessel>
 class _VesselPainter extends CustomPainter {
   final LiquidSim sim;
   final Color tint;
+  final double tilt;
   final bool showRim;
-  _VesselPainter(this.sim, this.tint, [this.showRim = true]);
+  _VesselPainter(this.sim, this.tint, [this.tilt = 0, this.showRim = true]);
 
   static Color _darker(Color c, double t) =>
       Color.lerp(c, Colors.black, t)!.withValues(alpha: 1);
@@ -153,6 +161,10 @@ class _VesselPainter extends CustomPainter {
     canvas.save();
     canvas.translate(cx, cy);
     canvas.clipPath(Path()..addOval(Rect.fromCircle(center: Offset.zero, radius: r)));
+    // Level the liquid to gravity: the circular vessel + clip are rotation-
+    // invariant, so spinning the whole liquid layer makes the surface stay
+    // perpendicular to gravity no matter how the phone is turned.
+    if (tilt != 0) canvas.rotate(tilt);
 
     final lv = sim.level.clamp(0.0, 1.0);
     if (lv > 0.004) {

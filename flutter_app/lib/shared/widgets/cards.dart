@@ -4,10 +4,12 @@ import 'package:noop/core/theme/palette.dart';
 import 'package:noop/shared/widgets/motion.dart';
 import 'package:noop/shared/widgets/surface.dart';
 
-/// A floating card in the nav-bar family: a lightly-raised tonal surface with a
-/// hairline ring and a soft drop shadow, so every card reads like the bar. When
-/// [accent] is set the container tints tonally toward that colour. Springs on
-/// press. Expressive rounded corners.
+/// A floating card in the nav-bar family: a *translucent* tonal surface with a
+/// soft drop shadow, so the scenic background shows through exactly like the
+/// floating nav bar — cards read as frosted chrome, not solid slabs. When
+/// [accent] is set the container tints tonally toward that colour (still
+/// translucent). Expressive rounded corners; tapping navigates immediately (no
+/// press-spring preview).
 class NoopCard extends StatelessWidget {
   final Widget child;
   final EdgeInsetsGeometry padding;
@@ -43,10 +45,14 @@ class NoopCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final r = BorderRadius.circular(radius);
     final base = Palette.surfaceRaised;
-    final fill = fillColor ??
+    // Resolve the opaque tone first (raised, or accent-tinted, or an explicit
+    // override), then push it through the global transparency knob so the
+    // scenic background shows through like the floating nav bar.
+    final solid = fillColor ??
         (accent == null
             ? base
             : Color.alphaBlend(accent!.withValues(alpha: 0.12), base));
+    final fill = Palette.chrome(solid);
 
     if (squircle) {
       final shape = RoundedSuperellipseBorder(
@@ -58,6 +64,7 @@ class NoopCard extends StatelessWidget {
       return Pressable(
         onTap: onTap,
         borderRadius: r,
+        pressedScale: 1.0, // no press-spring preview — tap navigates directly
         child: Container(
           decoration: ShapeDecoration(
             shape: shape,

@@ -1,24 +1,39 @@
-import 'package:animations/animations.dart';
 import 'package:flutter/material.dart';
 
 import 'package:noop/core/theme/metrics.dart';
 import 'package:noop/core/theme/palette.dart';
 
-/// Shared-axis (horizontal) page route — the signature Plane transition: the new
-/// page fades+scales in while the old one fades+scales out along the x-axis.
+/// The one page transition used for every push in the app: a subtle horizontal
+/// glide + fade.
+///
+/// It is driven ONLY by the route's own [animation] — never the page
+/// underneath's [secondaryAnimation]. The old shared-axis transition asked the
+/// page below to co-animate, but tab roots (Home / Trends) don't drive that
+/// while pushed sub-pages do, so a push off a tab looked different from a push
+/// off a sub-screen. Being self-contained, this looks byte-for-byte identical
+/// on every screen, on the way in and on the way back.
 Route<T> noopRoute<T>(Widget page) {
   return PageRouteBuilder<T>(
-    transitionDuration: const Duration(milliseconds: 320),
-    reverseTransitionDuration: const Duration(milliseconds: 280),
+    transitionDuration: const Duration(milliseconds: 300),
+    reverseTransitionDuration: const Duration(milliseconds: 260),
     pageBuilder: (context, animation, secondary) => page,
-    transitionsBuilder: (context, animation, secondary, child) =>
-        SharedAxisTransition(
-      animation: animation,
-      secondaryAnimation: secondary,
-      transitionType: SharedAxisTransitionType.horizontal,
-      fillColor: Colors.transparent,
-      child: child,
-    ),
+    transitionsBuilder: (context, animation, secondary, child) {
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+        reverseCurve: Curves.easeInCubic,
+      );
+      return FadeTransition(
+        opacity: curved,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0.18, 0),
+            end: Offset.zero,
+          ).animate(curved),
+          child: child,
+        ),
+      );
+    },
   );
 }
 
@@ -32,7 +47,7 @@ Future<T?> showNoopSheet<T>(
   return showModalBottomSheet<T>(
     context: context,
     isScrollControlled: true,
-    backgroundColor: Palette.surfaceRaised,
+    backgroundColor: Palette.fillRaised,
     barrierColor: Colors.black.withValues(alpha: 0.55),
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(Metrics.cornerSheet)),

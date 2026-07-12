@@ -1,5 +1,9 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:noop/core/data/db/database.dart' show AppDatabase;
+import 'package:noop/core/state/log_store.dart';
+import 'package:noop/core/state/providers.dart' show databaseProvider;
+
 /// Which part of the day a logbook behaviour belongs to — drives the section
 /// grouping on the logbook screen (STATUS / DAYTIME / NIGHTTIME).
 enum JournalSection { status, daytime, nighttime }
@@ -75,15 +79,25 @@ final selectedBehaviorsProvider =
     StateNotifierProvider<SelectedBehaviors, Set<String>>((ref) => SelectedBehaviors());
 
 /// Yes/no answers keyed by `yyyy-MM-dd|behaviorId`. true = ✓, false = ✕,
-/// absent = unanswered. In-memory temp store.
+/// absent = unanswered. Drift-backed (seeded from [LogStore]).
 class JournalAnswers extends StateNotifier<Map<String, bool>> {
-  JournalAnswers() : super({});
+  JournalAnswers(this._db) : super(Map.of(LogStore.instance.journal));
 
-  void set(String key, bool yes) => state = {...state, key: yes};
+  final AppDatabase _db;
+
+  void set(String key, bool yes) {
+    state = {...state, key: yes};
+    LogStore.instance.journal[key] = yes;
+    final i = key.indexOf('|');
+    if (i > 0) {
+      _db.setJournalAnswer(key.substring(0, i), key.substring(i + 1), yes);
+    }
+  }
 }
 
 final journalAnswersProvider =
-    StateNotifierProvider<JournalAnswers, Map<String, bool>>((ref) => JournalAnswers());
+    StateNotifierProvider<JournalAnswers, Map<String, bool>>(
+        (ref) => JournalAnswers(ref.watch(databaseProvider)));
 
 /// The day the logbook is currently showing.
 final journalDayProvider = StateProvider<DateTime>((ref) {

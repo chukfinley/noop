@@ -1,9 +1,11 @@
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import 'package:noop/main.dart';
+import 'package:noop/core/data/db/database.dart';
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/core/state/format.dart';
 import 'package:noop/core/data/repository.dart';
@@ -14,7 +16,12 @@ import 'package:noop/core/analytics/baselines.dart';
 
 /// Boot straight into the shell (skip the onboarding gate).
 Widget _bootedApp() => ProviderScope(
-      overrides: [onboardedProvider.overrideWith((ref) => true)],
+      overrides: [
+        onboardedProvider.overrideWith((ref) => true),
+        // In-memory DB so any nutrition read doesn't touch path_provider.
+        databaseProvider
+            .overrideWithValue(AppDatabase.forTesting(NativeDatabase.memory())),
+      ],
       child: const NoopApp(),
     );
 
@@ -29,13 +36,46 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('every bottom-nav tab builds (IndexedStack mounts all)', (tester) async {
+  testWidgets('home arrange mode: long-press enters, Done leaves (easy exit)',
+      (tester) async {
     await tester.pumpWidget(_bootedApp());
     await tester.pump(const Duration(seconds: 1));
-    // All four tab screens are mounted at once (offstage) — their titles exist.
-    expect(find.text('Trends', skipOffstage: false), findsWidgets);
-    expect(find.text('Sleep', skipOffstage: false), findsWidgets);
-    expect(find.text('Settings', skipOffstage: false), findsWidgets);
+
+    // Enter arrange mode by long-pressing any home widget (the edit pill is
+    // gone). The scene header "TODAY" sits under the home's long-press detector.
+    await tester.longPress(find.text('TODAY'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('ARRANGE HOME'), findsOneWidget);
+    expect(find.text('Done'), findsOneWidget);
+
+    // The pinned Done button leaves arrange mode again. Pump once to rebuild the
+    // normal home (which schedules its staggered Reveal timers), then advance
+    // time so those timers fire before teardown.
+    await tester.tap(find.text('Done'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('ARRANGE HOME'), findsNothing);
+    expect(find.text('TODAY'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('tabs swipe left through the pager (Today → … → Settings)',
+      (tester) async {
+    await tester.pumpWidget(_bootedApp());
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.byType(PageView), findsOneWidget);
+
+    Future<void> swipeLeft() async {
+      await tester.fling(find.byType(PageView), const Offset(-500, 0), 1500);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+    }
+
+    await swipeLeft(); // → Sleep
+    await swipeLeft(); // → Trends
+    expect(find.textContaining('Latest data'), findsOneWidget);
+    await swipeLeft(); // → Settings
+    expect(find.text('Appearance'), findsWidgets);
     expect(tester.takeException(), isNull);
   });
 

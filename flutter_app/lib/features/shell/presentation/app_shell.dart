@@ -1,22 +1,35 @@
 import 'dart:ui' show ImageFilter;
 
-import 'package:animations/animations.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:noop/shared/widgets/coming_soon.dart';
+import 'package:noop/core/state/providers.dart';
 import 'package:noop/core/theme/metrics.dart';
 import 'package:noop/core/theme/palette.dart';
+import 'package:noop/features/nutrition/presentation/nutrition_screen.dart';
 import 'package:noop/features/today/presentation/today_screen.dart';
 import 'package:noop/features/trends/presentation/trends_screen.dart';
+import 'package:noop/shared/widgets/backgrounds.dart';
+import 'package:noop/shared/widgets/behavior.dart';
 import 'package:noop/features/sleep/presentation/sleep_screen.dart';
 import 'package:noop/features/settings/presentation/settings_screen.dart';
 
-/// The app shell — a floating, solid black-grey pill of tabs plus a detached
-/// round "+" button, over an [IndexedStack] body. No glass/blur. A single indigo
-/// highlight *slides* horizontally from the old tab to the new one, so switching
-/// reads as the selection gliding across rather than popping in place.
+// ── Shared bar language (no borders anywhere) ───────────────────────────────
+// The nav bar, the centre "+"/"×" and the quick-add panel all share the same
+// lightly-translucent fill, the same "selected" highlight tint and the same
+// on-bar ink, so the whole cluster reads as one material.
+Color _barFill(ColorScheme scheme) =>
+    scheme.surfaceContainerHigh.withValues(alpha: 0.93);
+Color get _barHighlight => Palette.isLight
+    ? Colors.black.withValues(alpha: 0.06)
+    : const Color(0x24FFFFFF);
+Color get _barOnColor => Palette.isLight ? Palette.textPrimary : Colors.white;
+
+/// The app shell — a floating, solid black-grey pill of tabs with the "+" docked
+/// dead-centre, over an [IndexedStack] body. Tapping "+" raises a quick-add grid
+/// panel *above* the bar and morphs the "+" into an "×"; the bar itself stays
+/// put and tappable. A single highlight slides horizontally between tabs.
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
   @override
@@ -25,17 +38,76 @@ class AppShell extends ConsumerStatefulWidget {
 
 class _AppShellState extends ConsumerState<AppShell> {
   int _index = 0;
-  bool _reverse = false;
   bool _collapsed = false; // nav bar shrinks (labels hide) on scroll-down
+  bool _addOpen = false; // quick-add panel raised
 
-  void _select(int i) => setState(() {
-        _reverse = i < _index; // going to an earlier tab → slide back
+  // Drives the swipeable tab pager. Horizontal swipes move between tabs; nav-bar
+  // taps animate to the tapped page.
+  final PageController _pageController = PageController();
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  /// Nav-bar tap → animate the pager to tab [i].
+  void _select(int i) {
+    setState(() {
+      _index = i;
+      _collapsed = false; // always show the full bar when switching tabs
+      _addOpen = false; // and close the quick-add panel
+    });
+    _pageController.animateToPage(
+      i,
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  /// Swipe settled on a new page → keep the nav bar in sync.
+  void _onPageChanged(int i) => setState(() {
         _index = i;
-        _collapsed = false; // always show the full bar when switching tabs
+        _collapsed = false;
+        _addOpen = false;
       });
 
+  void _toggleAdd() => setState(() => _addOpen = !_addOpen);
+  void _closeAdd() {
+    if (_addOpen) setState(() => _addOpen = false);
+  }
+
+  /// A quick-add tile was tapped: close the panel, then run its flow. Weight is
+  /// wired to a real, persisted entry; food/activity are placeholders for now.
+  void _handleQuickAdd(String id) {
+    _closeAdd();
+    if (id == 'weight') _logWeight();
+    if (id == 'food') {
+      Navigator.of(context).push(noopRoute(const NutritionScreen()));
+    }
+  }
+
+  /// Enter today's body weight in a frosted, translucent sheet — saved to the
+  /// persisted weight log.
+  Future<void> _logWeight() async {
+    final start = ref.read(weightLogProvider.notifier).latest ??
+        ref.read(profileProvider).weightKg;
+    final kg = await showModalBottomSheet<double>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.14),
+      builder: (_) => _WeightSheet(initial: start),
+    );
+    if (kg != null) {
+      ref.read(weightLogProvider.notifier).setForDay(DateTime.now(), kg);
+    }
+  }
+
   bool _onScroll(UserScrollNotification n) {
-    if (n.depth != 0) return false; // only the page's primary scroll view
+    // Only react to VERTICAL page scrolling (the pager itself scrolls
+    // horizontally and must not collapse the bar).
+    if (n.metrics.axis != Axis.vertical) return false;
     final dir = n.direction;
     if (dir == ScrollDirection.reverse && !_collapsed) {
       setState(() => _collapsed = true);
@@ -47,179 +119,281 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   static const _tabs = [
     _Dest(Icons.today_outlined, Icons.today_rounded, 'Today'),
-    _Dest(Icons.trending_up_outlined, Icons.trending_up_rounded, 'Trends'),
     _Dest(Icons.bedtime_outlined, Icons.bedtime_rounded, 'Sleep'),
+    _Dest(Icons.trending_up_outlined, Icons.trending_up_rounded, 'Trends'),
     _Dest(Icons.settings_outlined, Icons.settings_rounded, 'Settings'),
   ];
 
   static const _pages = [
     TodayScreen(),
-    TrendsScreen(),
     SleepScreen(),
+    TrendsScreen(),
     SettingsScreen(),
   ];
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      extendBody: true,
-      body: NotificationListener<UserScrollNotification>(
-        onNotification: _onScroll,
-        child: PageTransitionSwitcher(
-          duration: const Duration(milliseconds: 400),
-          reverse: _reverse,
-          transitionBuilder: (child, primary, secondary) => SharedAxisTransition(
-            animation: primary,
-            secondaryAnimation: secondary,
-            transitionType: SharedAxisTransitionType.horizontal,
-            fillColor: Colors.transparent,
-            child: child,
-          ),
-          child: KeyedSubtree(
-            key: ValueKey<int>(_index),
-            child: _pages[_index],
-          ),
+    return PopScope(
+      // Back closes the quick-add panel first, before popping the app.
+      canPop: !_addOpen,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _closeAdd();
+      },
+      child: Scaffold(
+        extendBody: true,
+        body: Stack(
+          children: [
+            // One shared wallpaper behind all tabs that pans as you swipe — the
+            // pages themselves are transparent (ShellWallpaperScope).
+            if (ref.watch(wallpaperProvider))
+              Positioned.fill(
+                child: _PanningWallpaper(
+                  controller: _pageController,
+                  pageCount: _pages.length,
+                ),
+              ),
+            NotificationListener<UserScrollNotification>(
+              onNotification: _onScroll,
+              child: ShellWallpaperScope(
+                child: PageView(
+                  controller: _pageController,
+                  onPageChanged: _onPageChanged,
+                  // Calmer horizontal recognition: the pager only claims the
+                  // gesture after a clearly horizontal drag, so scrolling down (or
+                  // a diagonal flick) no longer flips tabs by accident.
+                  physics: const _CalmPagePhysics(),
+                  children: _pages,
+                ),
+              ),
+            ),
+            // Quick-add overlay sits over the page but *under* the nav bar (which
+            // is drawn as bottomNavigationBar), so the "×" stays visible on top.
+            _QuickAddOverlay(
+              open: _addOpen,
+              onClose: _closeAdd,
+              onAction: _handleQuickAdd,
+            ),
+          ],
+        ),
+        bottomNavigationBar: _SlideBar(
+          tabs: _tabs,
+          index: _index,
+          collapsed: _collapsed,
+          addOpen: _addOpen,
+          onTap: _select,
+          onAdd: _toggleAdd,
         ),
       ),
-      bottomNavigationBar: _SlideBar(
-        tabs: _tabs,
-        index: _index,
-        collapsed: _collapsed,
-        onTap: _select,
-        onAdd: () => _showLogWeight(context),
-      ),
-    );
-  }
-
-  void _showLogWeight(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: false,
-      backgroundColor: Colors.transparent,
-      // Very light scrim so the page genuinely shows through the frosted glass
-      // instead of the panel reading as a flat dark slab.
-      barrierColor: Colors.black.withValues(alpha: 0.08),
-      builder: (_) => const _LogWeightSheet(),
     );
   }
 }
 
-/// A frosted-glass bottom sheet — same material language as the nav bar. The
-/// quick-add actions (workout · weight · journal) have no real capture source
-/// yet, so each is shown as an inert "coming soon" tile rather than writing
-/// fabricated entries.
-class _LogWeightSheet extends StatelessWidget {
-  const _LogWeightSheet();
+/// Page physics that makes horizontal swiping less eager: the pager's drag
+/// recognizer must see a more deliberate horizontal motion before it wins the
+/// gesture arena, so a mostly-vertical scroll (or a diagonal flick) stays with
+/// the list instead of flipping tabs. Snap/settle behaviour is inherited.
+class _CalmPagePhysics extends PageScrollPhysics {
+  const _CalmPagePhysics({super.parent});
 
-  /// A translucent inner tile — the glass-on-glass surface used for each action.
-  BoxDecoration _tileBox(Color onGlass) => BoxDecoration(
-        color: onGlass.withValues(alpha: 0.07),
-        borderRadius: BorderRadius.circular(Metrics.cornerLarge),
-        border: Border.all(color: onGlass.withValues(alpha: 0.10), width: 1),
-      );
+  @override
+  _CalmPagePhysics applyTo(ScrollPhysics? ancestor) =>
+      _CalmPagePhysics(parent: buildParent(ancestor));
 
-  /// A square, non-interactive placeholder tile — icon, label and a compact
-  /// "SOON" badge, muted so it reads as planned rather than active.
-  Widget _tile(Color onGlass,
-          {required IconData icon, required String label}) =>
-      Container(
-        decoration: _tileBox(onGlass),
-        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: onGlass.withValues(alpha: 0.55), size: 26),
-            const SizedBox(height: 10),
-            Text(label,
-                textAlign: TextAlign.center,
-                style: NoopType.footnote
-                    .copyWith(color: onGlass.withValues(alpha: 0.6))),
-            const SizedBox(height: 10),
-            ComingSoonBadge(compact: true, onColor: onGlass),
-          ],
-        ),
-      );
+  // Default is a few logical px; raising it means the vertical list (default
+  // slop) almost always wins a diagonal gesture, while a clearly sideways swipe
+  // still crosses this and pages.
+  @override
+  double get dragStartDistanceMotionThreshold => 22.0;
+}
+
+/// The shared, parallax wallpaper drawn behind the tab pager. It listens to the
+/// [PageController] and slides the (slightly over-wide) photo horizontally as you
+/// swipe, so the wallpaper reads as one continuous backdrop that moves with you —
+/// like a phone home-screen wallpaper spanning multiple pages. A static scrim
+/// sits on top so content stays legible.
+class _PanningWallpaper extends StatelessWidget {
+  final PageController controller;
+  final int pageCount;
+  const _PanningWallpaper(
+      {required this.controller, required this.pageCount});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        double page = 0;
+        if (controller.hasClients &&
+            controller.position.hasContentDimensions) {
+          page = controller.page ?? 0;
+        }
+        final maxPage = (pageCount - 1).clamp(1, 999).toDouble();
+        final t = (page / maxPage).clamp(0.0, 1.0);
+        return LayoutBuilder(
+          builder: (context, c) {
+            final w = c.maxWidth;
+            // Full-width parallax: the wallpaper is [pageCount] screens wide and
+            // travels exactly one screen width per tab, so it moves 1:1 with the
+            // swipe — a distinct full-screen slice behind each tab, like a phone
+            // home-screen wallpaper spanning every page.
+            final totalW = w * pageCount;
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                Positioned(
+                  left: -t * (totalW - w),
+                  top: 0,
+                  bottom: 0,
+                  width: totalW,
+                  child: const WallpaperImage(),
+                ),
+                ColoredBox(
+                    color: Palette.surfaceBase.withValues(alpha: 0.45)),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+// ── Quick-add overlay ───────────────────────────────────────────────────────
+
+/// One quick-add action — a round, border-less tile (the same translucent
+/// "selected" fill as the centre button) with a label beneath.
+class _AddAction {
+  final String id;
+  final IconData icon;
+  final String label;
+  const _AddAction(this.id, this.icon, this.label);
+}
+
+const _addActions = <_AddAction>[
+  _AddAction('food', Icons.restaurant_rounded, 'Food'),
+  _AddAction('weight', Icons.monitor_weight_rounded, 'Weight'),
+  _AddAction('activity', Icons.directions_run_rounded, 'Log activity'),
+];
+
+/// The raised quick-add panel: a scrim that dims the page and a border-less,
+/// *floating* card (margins all round, gap above the bar) carrying a row of
+/// square (rounded-rect) actions. Reads as a detached panel that flies up.
+class _QuickAddOverlay extends StatelessWidget {
+  final bool open;
+  final VoidCallback onClose;
+  final ValueChanged<String> onAction;
+  const _QuickAddOverlay({
+    required this.open,
+    required this.onClose,
+    required this.onAction,
+  });
+
+  static const _anim = Duration(milliseconds: 300);
+  static const _curve = Curves.easeOutCubic;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final onGlass = Palette.isLight ? Palette.textPrimary : Colors.white;
+    // Sit right on the nav bar (bar height + safe area) — low and close, flush
+    // to the bar rather than floating high above it.
+    final bottomInset = MediaQuery.of(context).padding.bottom + 70;
 
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 16,
-        right: 16,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(Metrics.cornerSheet),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 48, sigmaY: 48),
-          child: Container(
-            decoration: BoxDecoration(
-              color: scheme.surfaceContainerHigh.withValues(alpha: 0.26),
-              borderRadius: BorderRadius.circular(Metrics.cornerSheet),
-              border: Border.all(
-                  color: onGlass.withValues(alpha: 0.10), width: 1),
+    return IgnorePointer(
+      ignoring: !open,
+      child: Stack(
+        children: [
+          // Scrim — very light, so the page still reads through it.
+          GestureDetector(
+            onTap: onClose,
+            child: AnimatedOpacity(
+              opacity: open ? 1 : 0,
+              duration: _anim,
+              curve: _curve,
+              child: Container(color: Colors.black.withValues(alpha: 0.10)),
             ),
-            padding: const EdgeInsets.fromLTRB(22, 12, 22, 22),
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Centred title (no grab handle, no close — swipe/tap-away to
-                  // dismiss).
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4, bottom: 4),
-                    child: Center(
-                      child: Text('Add to today',
-                          style: NoopType.headline.copyWith(color: onGlass)),
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 18),
-                    child: Center(
-                      child: Text('Quick-add is coming soon',
-                          style: NoopType.footnote.copyWith(
-                              color: onGlass.withValues(alpha: 0.6))),
-                    ),
-                  ),
-                  // Three equal placeholder tiles: workout · weight · journal.
-                  IntrinsicHeight(
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Expanded(
-                          child: _tile(onGlass,
-                              icon: Icons.fitness_center_rounded,
-                              label: 'Workout'),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _tile(onGlass,
-                              icon: Icons.monitor_weight_rounded,
-                              label: 'Weight'),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _tile(onGlass,
-                              icon: Icons.edit_note_rounded,
-                              label: 'Journal'),
+          ),
+          // The floating panel, sliding up a touch from its resting spot.
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(12, 0, 12, bottomInset),
+              child: AnimatedSlide(
+                offset: open ? Offset.zero : const Offset(0, 0.35),
+                duration: _anim,
+                curve: _curve,
+                child: AnimatedOpacity(
+                  opacity: open ? 1 : 0,
+                  duration: _anim,
+                  curve: _curve,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: _barFill(scheme),
+                      borderRadius: BorderRadius.circular(Metrics.cornerSheet),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(
+                              alpha: Palette.isLight ? 0.14 : 0.42),
+                          blurRadius: 34,
+                          offset: const Offset(0, 12),
                         ),
                       ],
                     ),
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        for (var k = 0; k < _addActions.length; k++) ...[
+                          if (k != 0) const SizedBox(width: 10),
+                          Expanded(child: _action(_addActions[k])),
+                        ],
+                      ],
+                    ),
                   ),
-                ],
+                ),
               ),
             ),
           ),
-        ),
+        ],
       ),
     );
   }
+
+  Widget _action(_AddAction a) => Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(Metrics.cornerLarge),
+          onTap: () => onAction(a.id),
+          hoverColor: Colors.transparent,
+          splashColor: Colors.transparent,
+          highlightColor: Colors.transparent,
+          child: Container(
+            height: 96,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              // Square (rounded-rect) tile, border-less, in the "selected" fill.
+              color: _barHighlight,
+              borderRadius: BorderRadius.circular(Metrics.cornerLarge),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(a.icon, size: 26, color: _barOnColor),
+                const SizedBox(height: 10),
+                Text(
+                  a.label,
+                  textAlign: TextAlign.center,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style:
+                      NoopType.footnote.copyWith(color: Palette.textSecondary),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
 }
+
+// ── Nav bar ─────────────────────────────────────────────────────────────────
 
 class _Dest {
   final IconData icon;
@@ -232,12 +406,14 @@ class _SlideBar extends StatelessWidget {
   final List<_Dest> tabs;
   final int index;
   final bool collapsed;
+  final bool addOpen;
   final ValueChanged<int> onTap;
   final VoidCallback onAdd;
   const _SlideBar({
     required this.tabs,
     required this.index,
     required this.collapsed,
+    required this.addOpen,
     required this.onTap,
     required this.onAdd,
   });
@@ -247,13 +423,6 @@ class _SlideBar extends StatelessWidget {
   double get _height => collapsed ? _collapsedH : _fullH;
   static const _slide = Duration(milliseconds: 260);
   static const _curve = Curves.easeOutCubic;
-  // Subtle highlight (like Plane) — a soft lift off the bar, not a colour. Dark
-  // on the white light-mode bar, light on the dark bar.
-  static Color get _highlight => Palette.isLight
-      ? Colors.black.withValues(alpha: 0.06)
-      : const Color(0x24FFFFFF);
-  // Active icon / the "+" glyph — near-black on the light bar, white on the dark.
-  static Color get _onBar => Palette.isLight ? Palette.textPrimary : Colors.white;
 
   @override
   Widget build(BuildContext context) {
@@ -262,22 +431,16 @@ class _SlideBar extends StatelessWidget {
       top: false,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-        child: Row(
-          children: [
-            Expanded(child: _bar(scheme)),
-            const SizedBox(width: Metrics.space12),
-            _addButton(scheme),
-          ],
-        ),
+        child: _bar(scheme),
       ),
     );
   }
 
   BoxDecoration _solid(ColorScheme scheme, BorderRadius radius) => BoxDecoration(
-        // Black-grey, only lightly translucent — plain transparency, no glass.
-        color: scheme.surfaceContainerHigh.withValues(alpha: 0.93),
+        // Lightly translucent, no glass, no outline (borders are out everywhere;
+        // the soft shadow gives the lift).
+        color: _barFill(scheme),
         borderRadius: radius,
-        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5), width: 1),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: Palette.isLight ? 0.10 : 0.34),
@@ -290,8 +453,12 @@ class _SlideBar extends StatelessWidget {
   Widget _bar(ColorScheme scheme) {
     final radius = BorderRadius.circular(Metrics.cornerPill);
     final n = tabs.length;
-    // Slot-centre alignment for the sliding highlight: -1 (first) … 1 (last).
-    final alignX = n <= 1 ? 0.0 : -1 + 2 * index / (n - 1);
+    final total = n + 1; // tab slots + the centre "+" in its own slot
+    final plusSlot = total ~/ 2; // dead centre
+    int slotOf(int tab) => tab < plusSlot ? tab : tab + 1;
+    // Slot-centre alignment for the sliding highlight over the ACTIVE tab,
+    // skipping the "+" slot: -1 (first) … 1 (last).
+    final alignX = total <= 1 ? 0.0 : -1 + 2 * slotOf(index) / (total - 1);
     return AnimatedContainer(
       duration: _slide,
       curve: _curve,
@@ -308,25 +475,24 @@ class _SlideBar extends StatelessWidget {
               duration: _slide,
               curve: _curve,
               child: FractionallySizedBox(
-                widthFactor: 1 / n,
+                widthFactor: 1 / total,
                 heightFactor: 1,
-                // Fills the full inner height so its rounded ends share the bar's
-                // curvature and nest concentrically into the corners — an even
-                // gap all around, never a mismatched curve at the left/right end.
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: _highlight,
+                    color: _barHighlight,
                     borderRadius: BorderRadius.circular(Metrics.cornerPill),
                   ),
                 ),
               ),
             ),
-            // Icons on top; the active one rides the highlight.
+            // Tabs + the centre "+"/"×" on top; the active tab rides the highlight.
             Row(
               children: [
-                for (var i = 0; i < n; i++)
+                for (var s = 0; s < total; s++)
                   Expanded(
-                    child: _tab(scheme, i),
+                    child: s == plusSlot
+                        ? _plusButton(scheme)
+                        : _tab(scheme, s < plusSlot ? s : s - 1),
                   ),
               ],
             ),
@@ -357,7 +523,7 @@ class _SlideBar extends StatelessWidget {
                 active ? tabs[i].activeIcon : tabs[i].icon,
                 key: ValueKey(active),
                 size: 22,
-                color: active ? _onBar : scheme.onSurfaceVariant,
+                color: active ? _barOnColor : scheme.onSurfaceVariant,
               ),
             ),
             // The label collapses to nothing on scroll-down, leaving just icons.
@@ -374,7 +540,7 @@ class _SlideBar extends StatelessWidget {
                           fontSize: 10,
                           fontWeight:
                               active ? FontWeight.w600 : FontWeight.w500,
-                          color: active ? _onBar : scheme.onSurfaceVariant,
+                          color: active ? _barOnColor : scheme.onSurfaceVariant,
                         ),
                       ),
                     ),
@@ -385,7 +551,13 @@ class _SlideBar extends StatelessWidget {
     );
   }
 
-  Widget _addButton(ColorScheme scheme) => Material(
+  /// The centre button — the translucent "selected"-looking circle that morphs
+  /// between "+" (add) and "×" (close) as the quick-add panel opens. Sized to
+  /// fill the bar's inner height, shrinking with it when the bar collapses.
+  Widget _plusButton(ColorScheme scheme) {
+    final d = _height - 6; // inner height minus the bar's 3px inset
+    return Center(
+      child: Material(
         color: Colors.transparent,
         shape: const CircleBorder(),
         child: InkWell(
@@ -398,23 +570,190 @@ class _SlideBar extends StatelessWidget {
           child: AnimatedContainer(
             duration: _slide,
             curve: _curve,
-            width: _height,
-            height: _height,
+            width: d,
+            height: d,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              // Same solid fill as the bar so nothing shows through it.
-              color: scheme.surfaceContainerHigh.withValues(alpha: 0.93),
+              color: _barHighlight,
               shape: BoxShape.circle,
-              border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5), width: 1),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: Palette.isLight ? 0.10 : 0.34),
-                  blurRadius: 28,
-                  offset: const Offset(0, 10),
+            ),
+            child: AnimatedSwitcher(
+              duration: _slide,
+              transitionBuilder: (child, a) => RotationTransition(
+                turns: Tween<double>(begin: 0.6, end: 1).animate(a),
+                child: FadeTransition(opacity: a, child: child),
+              ),
+              child: Icon(
+                addOpen ? Icons.close_rounded : Icons.add_rounded,
+                key: ValueKey<bool>(addOpen),
+                size: 26,
+                color: _barOnColor,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Weight entry ────────────────────────────────────────────────────────────
+
+/// A frosted, translucent weight-entry sheet — a blurred glass panel (no
+/// borders) with a big editable value flanked by ± steppers and a Save button.
+class _WeightSheet extends StatefulWidget {
+  final double initial;
+  const _WeightSheet({required this.initial});
+
+  @override
+  State<_WeightSheet> createState() => _WeightSheetState();
+}
+
+class _WeightSheetState extends State<_WeightSheet> {
+  late double _kg = widget.initial.clamp(20.0, 400.0);
+  late final TextEditingController _ctrl =
+      TextEditingController(text: _fmt(_kg));
+
+  static String _fmt(double v) => v.toStringAsFixed(1);
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _bump(double d) {
+    final v = double.tryParse(_ctrl.text.trim().replaceAll(',', '.')) ?? _kg;
+    setState(() {
+      _kg = (v + d).clamp(20.0, 400.0);
+      _ctrl.text = _fmt(_kg);
+      _ctrl.selection =
+          TextSelection.collapsed(offset: _ctrl.text.length);
+    });
+  }
+
+  void _save() {
+    final v = double.tryParse(_ctrl.text.trim().replaceAll(',', '.'));
+    if (v != null && v >= 20 && v <= 400) Navigator.pop(context, v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final onGlass = Palette.isLight ? Palette.textPrimary : Colors.white;
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16,
+        right: 16,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(Metrics.cornerSheet),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 40, sigmaY: 40),
+          child: Container(
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHigh.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(Metrics.cornerSheet),
+            ),
+            padding: const EdgeInsets.fromLTRB(22, 18, 22, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Log weight',
+                    style: NoopType.headline.copyWith(color: onGlass)),
+                const SizedBox(height: 18),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    _StepBtn(
+                        icon: Icons.remove_rounded,
+                        onTap: () => _bump(-0.1),
+                        onGlass: onGlass),
+                    SizedBox(
+                      width: 128,
+                      child: TextField(
+                        controller: _ctrl,
+                        autofocus: true,
+                        textAlign: TextAlign.center,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        style: NoopType.number(36).copyWith(color: onGlass),
+                        cursorColor: Palette.accent,
+                        onSubmitted: (_) => _save(),
+                        decoration: const InputDecoration(
+                          border: InputBorder.none,
+                          isCollapsed: true,
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: Text('kg',
+                          style: NoopType.body
+                              .copyWith(color: onGlass.withValues(alpha: 0.6))),
+                    ),
+                    _StepBtn(
+                        icon: Icons.add_rounded,
+                        onTap: () => _bump(0.1),
+                        onGlass: onGlass),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  child: Material(
+                    color: Palette.accent,
+                    borderRadius: BorderRadius.circular(Metrics.cornerLarge),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: _save,
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 14),
+                        child: Center(
+                          child: _SaveLabel(),
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
               ],
             ),
-            child: Icon(Icons.add_rounded, size: 28, color: _onBar),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SaveLabel extends StatelessWidget {
+  const _SaveLabel();
+  @override
+  Widget build(BuildContext context) => Text('Save',
+      style: NoopType.subhead
+          .copyWith(color: Colors.white, fontWeight: FontWeight.w700));
+}
+
+/// A round translucent ± stepper for the weight sheet (glass-on-glass, no border).
+class _StepBtn extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  final Color onGlass;
+  const _StepBtn(
+      {required this.icon, required this.onTap, required this.onGlass});
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: onGlass.withValues(alpha: 0.10),
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Icon(icon, color: onGlass, size: 22),
           ),
         ),
       );

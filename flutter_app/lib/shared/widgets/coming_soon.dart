@@ -87,12 +87,17 @@ class ComingSoonTile extends StatelessWidget {
   /// Corner radius — match the grid this tile drops into.
   final double radius;
 
+  /// When set the placeholder becomes tappable (e.g. to open an estimated
+  /// preview screen for a metric whose real source isn't wired up yet).
+  final VoidCallback? onTap;
+
   const ComingSoonTile({
     super.key,
     required this.label,
     this.icon,
     this.squircle = false,
     this.radius = Metrics.cardRadius,
+    this.onTap,
   });
 
   @override
@@ -103,6 +108,7 @@ class ComingSoonTile extends StatelessWidget {
       squircle: squircle,
       radius: radius,
       fillColor: recessed,
+      onTap: onTap,
       padding: const EdgeInsets.all(Metrics.space14),
       child: ConstrainedBox(
         constraints: const BoxConstraints(

@@ -102,17 +102,18 @@ class SleepStager {
     final startTs = epochTs[lo];
     final endTs = epochTs[hi] + epochSec;
 
-    // Sleeping baseline HR = mean HR of sleepy epochs inside the window.
-    double hrSum = 0;
-    int hrCnt = 0;
+    // Sleeping baseline HR = MEDIAN HR of sleepy epochs inside the window
+    // (ryanbr #268). A handful of brief arousal/wake spikes (up to ~190 bpm)
+    // pull a mean over the sleep threshold and skew the deep/REM banding — or,
+    // in the strap's own detector, get a whole normal night rejected as "no
+    // sleep." The spike-robust median recovers exactly those nights; on a clean
+    // night the median and mean coincide, so nothing changes.
+    final sleepyHr = <double>[];
     for (var i = lo; i <= hi; i++) {
       final h = epochHr[i];
-      if (h != null && sleepy[i]) {
-        hrSum += h;
-        hrCnt++;
-      }
+      if (h != null && sleepy[i]) sleepyHr.add(h);
     }
-    final baseline = hrCnt > 0 ? hrSum / hrCnt : hrFloor;
+    final baseline = sleepyHr.isNotEmpty ? _median(sleepyHr) : hrFloor;
     final winLen = hi - lo + 1;
     final deepBand = hrFloor + _hrSleepMargin * 0.5; // lowest HR band
     final remBand = baseline + 3.0; // elevated above deep, movement tiny
@@ -286,6 +287,14 @@ class SleepStager {
     if (minutes <= 0) return null;
     final rate = peaks / minutes;
     return rate.clamp(8.0, 22.0).toDouble();
+  }
+
+  /// Median of a non-empty list (spike-robust central tendency).
+  static double _median(List<double> xs) {
+    final s = List<double>.from(xs)..sort();
+    final n = s.length;
+    if (n == 0) return 0;
+    return n.isOdd ? s[n ~/ 2] : (s[n ~/ 2 - 1] + s[n ~/ 2]) / 2.0;
   }
 
   static double _std(List<double> xs) {

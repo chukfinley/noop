@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:noop/core/data/models.dart';
+import 'package:noop/core/state/prefs.dart' show HrvWindow;
 import 'package:noop/core/analytics/baselines.dart';
 import 'package:noop/core/analytics/engines.dart' as engines;
 import 'package:noop/core/analytics/hrv_analyzer.dart';
@@ -22,9 +23,15 @@ import 'package:noop/core/analytics/strain_scorer.dart';
 /// State (baselines + trailing histories) persists across days, so day N is
 /// scored against the wearer's history up to day N-1, exactly like the real app.
 class DailyPipeline {
-  DailyPipeline(this.profile);
+  DailyPipeline(this.profile, {this.hrvWindow = HrvWindow.wholeNight});
 
   final UserProfile profile;
+
+  /// Which sleep window nightly HRV is scored over (ryanbr #141). Fixed for the
+  /// life of the pipeline — the setting is read once at construction, so a
+  /// change re-scores on the next launch (like WHOOP re-anchoring over a few
+  /// nights), never mid-run.
+  final HrvWindow hrvWindow;
 
   final BaselineState _hrvBase = BaselineState();
   final BaselineState _rhrBase = BaselineState();
@@ -81,11 +88,28 @@ class DailyPipeline {
           RecoveryScorer.restingHR(tsHr, bpm, sleep.startTs, sleep.endTs);
 
       // RMSSD over the real beat-to-beat RR intervals inside the window.
+      // With the deep-sleep window (ryanbr #141) only beats that fall inside a
+      // deep (slow-wave) segment count, matching WHOOP's methodology; otherwise
+      // the whole sleep window is used.
       final rr = <double>[];
+      final deep = hrvWindow == HrvWindow.deepSleep;
       for (final r in s) {
-        if (r.ts >= sleep.startTs && r.ts <= sleep.endTs) rr.addAll(r.rrIntervals);
+        if (r.ts < sleep.startTs || r.ts > sleep.endTs) continue;
+        if (deep && !_inDeepSegment(sleep, r.ts)) continue;
+        rr.addAll(r.rrIntervals);
       }
+      // Fall back to the whole-night window if the deep window was too sparse
+      // to yield a trustworthy reading, so a night is never dropped outright.
       hrv = HrvAnalyzer.analyzeRaw(rr).rmssd;
+      if (deep && hrv == null) {
+        final all = <double>[];
+        for (final r in s) {
+          if (r.ts >= sleep.startTs && r.ts <= sleep.endTs) {
+            all.addAll(r.rrIntervals);
+          }
+        }
+        hrv = HrvAnalyzer.analyzeRaw(all).rmssd;
+      }
       resp = sleep.respRate;
       sleepSpo2 = _windowSpo2(s, sleep.startTs, sleep.endTs);
       sleepPerf = sleep.efficiency;
@@ -183,6 +207,15 @@ class DailyPipeline {
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
+
+  /// Whether unix-second [ts] falls inside a deep-stage hypnogram segment.
+  static bool _inDeepSegment(SleepResult sr, int ts) {
+    for (final seg in sr.hypnogram) {
+      if (seg.stage != SleepStageK.deep) continue;
+      if (ts >= seg.startTs && ts < seg.startTs + seg.durationSec) return true;
+    }
+    return false;
+  }
 
   SleepRecord _buildSleepRecord(RawDay day, SleepResult sr, double? resp) {
     DateTime t(int ts) => DateTime.fromMillisecondsSinceEpoch(ts * 1000);

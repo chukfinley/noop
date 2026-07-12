@@ -54,12 +54,15 @@ class MetricGauge extends ConsumerWidget {
         center: center,
       );
     }
+    // Level the water to gravity as the phone turns (0 on desktop/tests).
+    final tilt = ref.watch(gaugeTiltProvider).valueOrNull ?? 0.0;
     return LiquidVessel(
       fraction: fraction,
       ramp: ramp,
       size: size,
       showRim: false,
       center: center,
+      tiltAngle: tilt,
     );
   }
 }

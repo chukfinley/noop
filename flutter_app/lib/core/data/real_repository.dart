@@ -7,6 +7,7 @@ import 'package:noop/core/analytics/daily_pipeline.dart';
 import 'package:noop/core/analytics/raw_samples.dart';
 import 'package:noop/core/data/models.dart';
 import 'package:noop/core/data/repository.dart';
+import 'package:noop/core/state/prefs.dart' show Prefs;
 
 /// Repository backed by the REAL Whoop strap capture bundled in
 /// `assets/data/real_raw.bin.gz`: ~2.7M genuine per-second sensor rows over 88
@@ -49,7 +50,10 @@ class RealRepository implements Repository {
     final capture = RawCapture.decode(payload);
 
     const profile = UserProfile(name: 'Athlete');
-    final days = DailyPipeline(profile).run(capture.days);
+    // The HRV window (whole-night vs deep-sleep, ryanbr #141) is read once here,
+    // so a settings change re-scores the whole capture on the next launch.
+    final days =
+        DailyPipeline(profile, hrvWindow: Prefs.instance.hrvWindow).run(capture.days);
     if (days.isEmpty) throw StateError('real capture produced no days');
 
     return RealRepository._(days, const [], _buildVitals(days));

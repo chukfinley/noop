@@ -443,7 +443,7 @@ class _StageStripPainter extends CustomPainter {
     // Track.
     canvas.drawRRect(
       RRect.fromRectAndRadius(Offset.zero & size, r),
-      Paint()..color = Palette.surfaceInset,
+      Paint()..color = Palette.fillInset,
     );
     for (final seg in segments.where((s) => s.stage == stage)) {
       final x0 = (seg.start.millisecondsSinceEpoch - bedtime.millisecondsSinceEpoch) /

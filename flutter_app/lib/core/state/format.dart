@@ -1,8 +1,25 @@
 import 'package:intl/intl.dart';
 
+import 'package:noop/core/state/prefs.dart' show EffortScale;
+
 /// Display formatting helpers shared across screens.
 class Fmt {
   Fmt._();
+
+  /// Format an Effort/day-strain value (always computed on the internal 0..100
+  /// scale) for display under the user's chosen [EffortScale] (ryanbr #45).
+  /// The 0..21 WHOOP scale is linearly compressed and shown with one decimal
+  /// (matching WHOOP); 0..100 is shown as a whole number. Band/state thresholds
+  /// stay on the internal 0..100 value, so only the number changes.
+  static String effort(double v0to100, EffortScale scale) => scale == EffortScale.whoop
+      ? (v0to100 / 100.0 * 21.0).toStringAsFixed(1)
+      : v0to100.round().toString();
+
+  /// Celsius → the user's unit. Pass an absolute temperature in °C.
+  static String temp(double celsius, {required bool fahrenheit, int digits = 0}) {
+    final v = fahrenheit ? celsius * 9 / 5 + 32 : celsius;
+    return '${v.toStringAsFixed(digits)}°${fahrenheit ? 'F' : 'C'}';
+  }
 
   static String hm(Duration d) {
     final h = d.inHours;

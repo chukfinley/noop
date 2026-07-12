@@ -2,13 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:noop/core/data/models.dart';
+import 'package:noop/core/state/format.dart';
 import 'package:noop/core/state/providers.dart';
+import 'package:noop/shared/widgets/backgrounds.dart';
 import 'package:noop/shared/widgets/behavior.dart';
 import 'package:noop/shared/widgets/cards.dart';
 import 'package:noop/shared/widgets/coming_soon.dart';
 import 'package:noop/shared/widgets/health_charts.dart';
+import 'package:noop/shared/widgets/motion.dart';
 import 'package:noop/core/theme/metrics.dart';
 import 'package:noop/core/theme/palette.dart';
+import 'package:noop/features/health/presentation/heart_rate_screen.dart';
+import 'package:noop/features/health/presentation/weight_screen.dart';
 import 'package:noop/features/metrics/presentation/metric_trend_screen.dart';
 
 /// Trends — a Google-Health-style grid of metric cards. Each card shows the
@@ -26,13 +31,27 @@ class TrendsScreen extends ConsumerWidget {
     return b.toString();
   }
 
-  static String _fmt1(double kg) =>
-      kg == kg.roundToDouble() ? kg.toStringAsFixed(0) : kg.toStringAsFixed(1);
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final days = ref.watch(daysProvider);
+    final weightLog = ref.watch(weightLogProvider);
+    final waterLog = ref.watch(waterLogProvider);
     final profile = ref.watch(profileProvider);
+
+    // Weight: carry the last known logged weight forward so gaps between
+    // weigh-ins read as flat, not a drop to zero.
+    double? lastW;
+    final weightDaily = <double>[];
+    final weightDates = <DateTime>[];
+    for (final d in days) {
+      final v = weightLog[isoDay(d.date)];
+      if (v != null) lastW = v;
+      weightDaily.add(lastW ?? profile.weightKg);
+      weightDates.add(d.date);
+    }
+    // Water: user-entered ml per day; 0 is a valid real value.
+    final waterDaily = [for (final d in days) (waterLog[isoDay(d.date)] ?? 0.0)];
+    final waterDates = [for (final d in days) d.date];
 
     final win = days.length <= 14 ? days : days.sublist(days.length - 14);
     final dates = win.map((d) => d.date).toList();
@@ -44,19 +63,50 @@ class TrendsScreen extends ConsumerWidget {
       return s.fold(0.0, (a, b) => a + b);
     }
 
+    // Mean intraday heart rate for a day (0 when the day has no HR thread).
+    double avgHr(DayRecord d) => d.hr.isEmpty
+        ? 0
+        : d.hr.map((e) => e.bpm).reduce((a, b) => a + b) / d.hr.length;
+
     final metrics = <TrendMetric>[
-      // Weight is a manual log with no real source wired up yet.
+      // Weight — real, user-logged; coming-soon only until the first weigh-in.
       TrendMetric(
         title: 'Weight',
         unit: 'kg',
         color: Palette.metricCyan,
         chart: TrendChart.line,
-        daily: const [],
-        dates: const [],
-        valueText: '',
-        status: '',
-        fmt: _fmt1,
-        comingSoon: true,
+        daily: weightDaily,
+        dates: weightDates,
+        valueText:
+            '${(weightLog.isEmpty ? profile.weightKg : (lastW ?? profile.weightKg)).toStringAsFixed(1)} kg',
+        status: 'Logged',
+        fmt: (v) => v.toStringAsFixed(1),
+        comingSoon: weightLog.isEmpty,
+      ),
+      // Heart rate — real intraday capture; opens the second/minute history.
+      TrendMetric(
+        title: 'Heart rate',
+        unit: 'bpm',
+        color: Palette.metricRose,
+        chart: TrendChart.line,
+        daily: field((d) => avgHr(d)),
+        dates: dates,
+        valueText: '${avgHr(win.last).round()} bpm',
+        status: 'Second · minute',
+        fmt: (v) => v.round().toString(),
+      ),
+      // Water — real, user-entered; 0 is a valid value, never coming-soon.
+      TrendMetric(
+        title: 'Water',
+        unit: 'ml',
+        color: Palette.metricCyan,
+        chart: TrendChart.bars,
+        daily: waterDaily,
+        dates: waterDates,
+        valueText: '${(waterDaily.isEmpty ? 0 : waterDaily.last).round()} ml',
+        status: 'Today',
+        fmt: (v) => '${v.round()}',
+        comingSoon: false,
       ),
       TrendMetric(
         title: 'Calories burned',
@@ -71,7 +121,6 @@ class TrendsScreen extends ConsumerWidget {
         fmt: (v) => _grp(v),
         targetLow: 2000,
         targetHigh: 2600,
-        comingSoon: true,
       ),
       TrendMetric(
         title: 'Recovery',
@@ -134,7 +183,6 @@ class TrendsScreen extends ConsumerWidget {
         fmt: (v) => _grp(v),
         targetLow: 8000,
         targetHigh: 12000,
-        comingSoon: true,
       ),
       TrendMetric(
         title: 'Stress',
@@ -160,7 +208,6 @@ class TrendsScreen extends ConsumerWidget {
         valueText: win.last.respiratoryRate.toStringAsFixed(1),
         status: 'Last night',
         fmt: (v) => v.toStringAsFixed(1),
-        comingSoon: true,
       ),
       TrendMetric(
         title: 'Blood oxygen',
@@ -172,7 +219,6 @@ class TrendsScreen extends ConsumerWidget {
         valueText: win.last.spo2.round().toString(),
         status: 'Last night',
         fmt: (v) => v.round().toString(),
-        comingSoon: true,
       ),
       TrendMetric(
         title: 'Fitness age',
@@ -184,7 +230,6 @@ class TrendsScreen extends ConsumerWidget {
         valueText: win.last.fitnessAge.toString(),
         status: 'Estimated',
         fmt: (v) => v.round().toString(),
-        comingSoon: true,
       ),
     ];
 
@@ -194,61 +239,67 @@ class TrendsScreen extends ConsumerWidget {
     // No nested Scaffold: the app shell has extendBody + a floating frosted nav
     // bar, so the page must fill the whole body (content scrolling *under* the
     // bar) for its transparency to read. A solid inner Scaffold broke that.
-    return Container(
-      color: Palette.surfaceBase,
+    return ScenicBackground(
       child: SafeArea(
         bottom: false,
-        child: Column(
+        // The "Trends" title floats over the scroll with a transparent
+        // background, so content stays visible as it scrolls past it instead of
+        // vanishing behind an opaque bar.
+        child: Stack(
           children: [
-            _Header(initial: profile.name.isEmpty ? 'A' : profile.name[0]),
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(
-                    Metrics.space16, Metrics.space8, Metrics.space16, 120),
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: Text('Key metrics',
-                            style: NoopType.title1
-                                .copyWith(color: Palette.textPrimary)),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.only(top: Metrics.space6),
-                        child: Text('Customise',
-                            style: NoopType.body.copyWith(color: Palette.accent)),
-                      ),
-                    ],
+            ListView(
+              padding: const EdgeInsets.fromLTRB(
+                  Metrics.space16, 48, Metrics.space16, 120),
+              children: [
+                // No second title here — the floating "Trends" header names the
+                // screen. This line instead states which day the data runs to,
+                // with its weekday, so it's obvious how current the numbers are.
+                Reveal(
+                  index: 0,
+                  child: Text(
+                    days.isEmpty
+                        ? ''
+                        : 'Latest data · ${Fmt.longDate(days.last.date)}',
+                    style: NoopType.subhead
+                        .copyWith(color: Palette.textSecondary),
                   ),
-                  const SizedBox(height: Metrics.space16),
-                  for (var i = 0; i < metrics.length; i += 2)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: Metrics.space12),
-                      child: IntrinsicHeight(
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Expanded(
-                                child: _MetricCard(
-                                    metric: metrics[i],
-                                    labels: labels7,
-                                    n: last7)),
-                            const SizedBox(width: Metrics.space12),
-                            Expanded(
-                              child: i + 1 < metrics.length
-                                  ? _MetricCard(
-                                      metric: metrics[i + 1],
+                ),
+                const SizedBox(height: Metrics.space16),
+                for (var i = 0; i < metrics.length; i += 2)
+                    Reveal(
+                      index: i ~/ 2 + 1,
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: Metrics.space12),
+                        child: IntrinsicHeight(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Expanded(
+                                  child: _MetricCard(
+                                      metric: metrics[i],
                                       labels: labels7,
-                                      n: last7)
-                                  : const SizedBox(),
-                            ),
-                          ],
+                                      n: last7)),
+                              const SizedBox(width: Metrics.space12),
+                              Expanded(
+                                child: i + 1 < metrics.length
+                                    ? _MetricCard(
+                                        metric: metrics[i + 1],
+                                        labels: labels7,
+                                        n: last7)
+                                    : const SizedBox(),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                ],
-              ),
+              ],
+            ),
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: _Header(),
             ),
           ],
         ),
@@ -258,44 +309,32 @@ class TrendsScreen extends ConsumerWidget {
 }
 
 class _Header extends StatelessWidget {
-  final String initial;
-  const _Header({required this.initial});
+  const _Header();
   @override
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.fromLTRB(
             Metrics.space16, Metrics.space8, Metrics.space16, Metrics.space8),
-        child: Row(
-          children: [
-            Icon(Icons.devices_other_rounded,
-                color: Palette.textSecondary, size: 24),
-            Expanded(
-              child: Center(
-                child: Text('Trends',
-                    style: NoopType.title2.copyWith(color: Palette.textPrimary)),
-              ),
-            ),
-            Container(
-              width: 34,
-              height: 34,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Palette.surfaceRaised,
-                shape: BoxShape.circle,
-              ),
-              child: Text(initial.toUpperCase(),
-                  style: NoopType.subhead.copyWith(color: Palette.textSecondary)),
-            ),
-          ],
+        child: Center(
+          child: Text('Trends',
+              style: NoopType.title2.copyWith(color: Palette.textPrimary)),
         ),
       );
 }
 
-class _MetricCard extends StatelessWidget {
+class _MetricCard extends ConsumerWidget {
   final TrendMetric metric;
   final List<String> labels;
   final int n;
   const _MetricCard(
       {required this.metric, required this.labels, required this.n});
+
+  /// Weight has its own editable tracker; Heart rate opens the second/minute
+  /// intraday history; every other metric opens the generic trend detail.
+  static Widget _detailFor(TrendMetric m) => switch (m.title) {
+        'Weight' => const WeightScreen(),
+        'Heart rate' => const HeartRateScreen(),
+        _ => MetricTrendScreen(metric: m),
+      };
 
   static IconData _iconFor(String title) => switch (title) {
         'Weight' => Icons.monitor_weight_rounded,
@@ -306,13 +345,19 @@ class _MetricCard extends StatelessWidget {
       };
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     // No real source yet — drop a matching-radius placeholder into the grid.
+    // When we at least have an estimated series, the placeholder is tappable and
+    // opens the same detail screen (flagged as an estimated preview inside).
     if (metric.comingSoon) {
       return ComingSoonTile(
         label: metric.title,
         icon: _iconFor(metric.title),
         radius: Metrics.cornerLarge,
+        onTap: metric.daily.isEmpty
+            ? null
+            : () => Navigator.of(context)
+                .push(noopRoute(_detailFor(metric))),
       );
     }
     final values = metric.lastN(n);
@@ -321,8 +366,7 @@ class _MetricCard extends StatelessWidget {
       accent: metric.color,
       radius: Metrics.cornerLarge,
       padding: const EdgeInsets.all(Metrics.space14),
-      onTap: () => Navigator.of(context)
-          .push(noopRoute(MetricTrendScreen(metric: metric))),
+      onTap: () => Navigator.of(context).push(noopRoute(_detailFor(metric))),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -349,7 +393,9 @@ class _MetricCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
-          metric.chart == TrendChart.bars
+          // A metric can prefer bars; the global "Trends bars" setting
+          // (ryanbr #134) forces bars on every card when enabled.
+          (metric.chart == TrendChart.bars || ref.watch(trendsBarsProvider))
               ? HealthMiniBars(
                   values: values,
                   labels: labels,

@@ -3,10 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:noop/core/theme/metrics.dart';
 import 'package:noop/core/theme/palette.dart';
 
-/// The "floating pill" look shared with the nav bar: a lightly-raised tonal
+/// The "floating pill" look shared with the nav bar: a *translucent* tonal
 /// surface, a hairline ring, and a soft drop shadow. Every chrome surface in the
 /// app draws with this so cards, sheets and the bar all read as one family —
-/// the bar is the reference, this is how the rest matches it.
+/// the bar is the reference, this is how the rest matches it. The default fill
+/// is the global translucent [Palette.fillRaised]; pass an explicit [fill]
+/// (already run through [Palette.chrome]) to override.
 BoxDecoration floatingSurface({
   double radius = Metrics.cardRadius,
   Color? fill,
@@ -16,7 +18,7 @@ BoxDecoration floatingSurface({
   double dy = 8,
 }) =>
     BoxDecoration(
-      color: fill ?? Palette.surfaceRaised,
+      color: fill ?? Palette.fillRaised,
       borderRadius: BorderRadius.circular(radius),
       border: Border.all(
         color: Palette.hairline.withValues(alpha: borderAlpha),

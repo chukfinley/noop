@@ -125,6 +125,24 @@ class HrvAnalyzer {
   static List<double> rangeFilter(List<double> rr) =>
       rr.where((it) => it >= rrMinMs && it <= rrMaxMs).toList();
 
+  /// True when beat `i` of [nn] is a Malik-style ectopic: it deviates from the
+  /// local median (a centered window of `2*ectopicWindowRadius+1` beats,
+  /// excluding the beat itself) by more than [ectopicThreshold] (20%). Beats
+  /// with too small a neighbourhood, or a non-positive local median, are kept.
+  static bool _isEctopicAt(List<double> nn, int i) {
+    if (nn.length <= ectopicWindowRadius) return false;
+    final lo = math.max(0, i - ectopicWindowRadius);
+    final hi = math.min(nn.length - 1, i + ectopicWindowRadius);
+    final neighbours = <double>[];
+    for (var j = lo; j <= hi; j++) {
+      if (j != i) neighbours.add(nn[j]);
+    }
+    if (neighbours.length < 2) return false;
+    final med = median(neighbours);
+    if (med <= 0) return false;
+    return (nn[i] - med).abs() / med > ectopicThreshold;
+  }
+
   /// Malik-style ectopic rejection: drop any beat that deviates from its local
   /// median by more than [ectopicThreshold] (20%). The local median is taken
   /// over a centered window of `2*ectopicWindowRadius+1` beats (excluding the
@@ -133,26 +151,7 @@ class HrvAnalyzer {
     if (nn.length <= ectopicWindowRadius) return nn;
     final kept = <double>[];
     for (var i = 0; i < nn.length; i++) {
-      final lo = math.max(0, i - ectopicWindowRadius);
-      final hi = math.min(nn.length - 1, i + ectopicWindowRadius);
-      final neighbours = <double>[];
-      for (var j = lo; j <= hi; j++) {
-        if (j != i) neighbours.add(nn[j]);
-      }
-      if (neighbours.length < 2) {
-        kept.add(nn[i]);
-        continue;
-      }
-      final med = median(neighbours);
-      if (med <= 0) {
-        kept.add(nn[i]);
-        continue;
-      }
-      final deviation = (nn[i] - med).abs() / med;
-      if (deviation <= ectopicThreshold) {
-        kept.add(nn[i]);
-      }
-      // else: drop this beat as ectopic.
+      if (!_isEctopicAt(nn, i)) kept.add(nn[i]);
     }
     return kept;
   }
@@ -160,6 +159,49 @@ class HrvAnalyzer {
   /// Full clean: range filter → ectopic rejection. Returns the clean NN series.
   static List<double> cleanRR(List<double> rr) =>
       rejectEctopic(rangeFilter(rr));
+
+  /// Gap-aware clean (ryanbr #204): the same range → ectopic pipeline as
+  /// [cleanRR], but it also returns, per surviving beat, whether a beat was
+  /// dropped between it and the previous survivor (`brokenBefore[i] == true`).
+  ///
+  /// HRV is built from the change between successive beats. When cleaning
+  /// removes a noisy beat its two neighbours become adjacent — and counting the
+  /// jump across that gap as a real beat-to-beat change lets one removed beat
+  /// dominate the whole window (RMSSD squares each change), reading high. The
+  /// break flags let the RMSSD/pNN50 loops skip any difference that spans a
+  /// removed beat, so a dropped beat can't manufacture a spike. On a clean
+  /// window nothing is dropped and every flag is false → results are identical.
+  static ({List<double> nn, List<bool> brokenBefore}) cleanRRWithBreaks(
+      List<double> rr) {
+    // Stage 1: range filter, remembering where an out-of-range beat was dropped.
+    final ranged = <double>[];
+    final rangedBreak = <bool>[];
+    var pending = false;
+    for (final v in rr) {
+      if (v >= rrMinMs && v <= rrMaxMs) {
+        rangedBreak.add(pending);
+        ranged.add(v);
+        pending = false;
+      } else {
+        pending = true; // a beat was dropped before the next survivor
+      }
+    }
+    // Stage 2: ectopic rejection over the range-filtered series, propagating a
+    // break across every dropped beat (from either stage) to the next survivor.
+    final nn = <double>[];
+    final brokenBefore = <bool>[];
+    pending = false;
+    for (var i = 0; i < ranged.length; i++) {
+      if (_isEctopicAt(ranged, i)) {
+        pending = true;
+        continue;
+      }
+      nn.add(ranged[i]);
+      brokenBefore.add(rangedBreak[i] || pending);
+      pending = false;
+    }
+    return (nn: nn, brokenBefore: brokenBefore);
+  }
 
   // ── Raw analysis ─────────────────────────────────────────────────────────
 
@@ -176,7 +218,9 @@ class HrvAnalyzer {
     double? maxRejectedFraction,
   }) {
     final nInput = rawRR.length;
-    final clean = cleanRR(rawRR);
+    final cleaned = cleanRRWithBreaks(rawRR);
+    final clean = cleaned.nn;
+    final broken = cleaned.brokenBefore;
     if (clean.length < minBeats) {
       return HrvResult.empty(nInput);
     }
@@ -190,16 +234,25 @@ class HrvAnalyzer {
         return HrvResult.empty(nInput);
       }
     }
-    final rmssd = rmssdRaw(clean);
-    final sdnn = sdnnRaw(clean);
-    final mean = _sum(clean) / clean.length.toDouble();
 
-    // pNN50 over the clean NN series.
+    // Gap-aware RMSSD + pNN50 (ryanbr #204): a successive difference that spans
+    // a removed beat (`broken[i]`) is skipped, so a dropped beat can't inflate
+    // the measure. SDNN and meanNN are single-beat statistics — unaffected by
+    // adjacency — so they use the full clean series unchanged.
+    var sumSq = 0.0;
+    var nDiff = 0;
     var nn50 = 0;
     for (var i = 1; i < clean.length; i++) {
-      if ((clean[i] - clean[i - 1]).abs() > 50.0) nn50 += 1;
+      if (broken[i]) continue; // difference spans a removed beat → skip
+      final d = clean[i] - clean[i - 1];
+      sumSq += d * d;
+      nDiff++;
+      if (d.abs() > 50.0) nn50 += 1;
     }
-    final pnn50 = nn50.toDouble() / (clean.length - 1).toDouble() * 100.0;
+    final rmssd = nDiff >= 1 ? math.sqrt(sumSq / nDiff.toDouble()) : null;
+    final pnn50 = nDiff >= 1 ? nn50.toDouble() / nDiff.toDouble() * 100.0 : null;
+    final sdnn = sdnnRaw(clean);
+    final mean = _sum(clean) / clean.length.toDouble();
 
     return HrvResult(
       rmssd: rmssd,
