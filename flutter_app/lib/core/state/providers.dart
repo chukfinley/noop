@@ -115,6 +115,15 @@ final trendsBarsProvider = StateProvider<bool>((ref) => Prefs.instance.trendsBar
 /// Whether temperatures show in Fahrenheit. Persisted.
 final fahrenheitProvider = StateProvider<bool>((ref) => Prefs.instance.fahrenheit);
 
+/// The active bottom-nav tab / pager page. Any screen can request a tab switch by
+/// setting this (e.g. the home Sleep dial jumps straight to the Sleep tab rather
+/// than pushing a detail screen); the shell keeps it in sync with swipes and
+/// nav-bar taps. Order: 0 Today · 1 Sleep · 2 Trends · 3 Settings.
+final selectedTabProvider = StateProvider<int>((ref) => 0);
+
+/// Tab index of the Sleep screen — keep in sync with AppShell's tab order.
+const int kSleepTabIndex = 1;
+
 /// In-plane gravity roll angle (radians) from the accelerometer, low-passed, so
 /// the liquid score gauges can level their "water" to real gravity as the phone
 /// turns — full 360°, any orientation. On platforms without an accelerometer

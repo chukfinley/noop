@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:noop/core/data/db/database.dart';
 import 'package:noop/core/data/nutrition/off_client.dart';
 import 'package:noop/core/ble/background/background_sync_service.dart';
+import 'package:noop/core/ble/background/background_sync_scheduler.dart';
 import 'package:noop/core/ble/transport/whoop_providers.dart';
 import 'package:noop/core/data/real_repository.dart';
 import 'package:noop/core/data/repository.dart';
@@ -58,6 +59,16 @@ Future<void> main() async {
   // strap is remembered, or when disabled — and tests never call main(), so it never runs under
   // `flutter test`.
   unawaited(maybeStartBackgroundSync(container));
+
+  // Android killed-app sync: the foreground service above only survives BACKGROUNDING (it dies with
+  // the process on swipe-away). To also sync AFTER the app is terminated, register a periodic
+  // WorkManager job whose headless isolate reconnects + offloads on its own (Android 15-min min).
+  // The two complement each other: WorkManager wakes the app after a kill, and while it runs the
+  // foreground service holds the connection window. Strict no-op off Android, when nothing is
+  // remembered, or when disabled — and tests never call main(), so it never registers under
+  // `flutter test`. It also starts the app-alive heartbeat that makes the headless task SKIP while
+  // this process is alive (the single-owner concurrency guard).
+  unawaited(maybeRegisterBackgroundSyncWork(container));
 
   runApp(UncontrolledProviderScope(
     container: container,

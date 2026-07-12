@@ -11,7 +11,6 @@ import 'package:noop/shared/widgets/behavior.dart';
 import 'package:noop/shared/widgets/cards.dart';
 import 'package:noop/shared/widgets/coming_soon.dart';
 import 'package:noop/shared/widgets/reorderable_cluster.dart';
-import 'package:noop/features/metrics/presentation/metric_detail_screen.dart';
 import 'package:noop/features/metrics/presentation/metric_trend_screen.dart';
 import 'package:noop/features/today/presentation/home_layout.dart';
 
@@ -100,10 +99,10 @@ class HealthMonitorSection extends ConsumerWidget {
               status: 'Last night',
               fmt: (v) => v.round().toString(),
             ));
+    // Sleep has its own tab — jump to it in the bottom nav, not a pushed screen.
     final sleepTap = editing
         ? null
-        : () => Navigator.of(context).push(
-            noopRoute(const MetricDetailScreen(kind: MetricKind.sleep)));
+        : () => ref.read(selectedTabProvider.notifier).state = kSleepTabIndex;
 
     (double, double) stats(double Function(DayRecord) f) {
       final values = <double>[];

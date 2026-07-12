@@ -37,12 +37,11 @@ class AppShell extends ConsumerStatefulWidget {
 }
 
 class _AppShellState extends ConsumerState<AppShell> {
-  int _index = 0;
   bool _collapsed = false; // nav bar shrinks (labels hide) on scroll-down
   bool _addOpen = false; // quick-add panel raised
 
   // Drives the swipeable tab pager. Horizontal swipes move between tabs; nav-bar
-  // taps animate to the tapped page.
+  // taps (and screens that request a tab, via selectedTabProvider) animate it.
   final PageController _pageController = PageController();
 
   @override
@@ -51,26 +50,23 @@ class _AppShellState extends ConsumerState<AppShell> {
     super.dispose();
   }
 
-  /// Nav-bar tap → animate the pager to tab [i].
+  /// Nav-bar tap → move to tab [i] (the pager animates via the provider listener).
   void _select(int i) {
+    ref.read(selectedTabProvider.notifier).state = i;
     setState(() {
-      _index = i;
       _collapsed = false; // always show the full bar when switching tabs
       _addOpen = false; // and close the quick-add panel
     });
-    _pageController.animateToPage(
-      i,
-      duration: const Duration(milliseconds: 320),
-      curve: Curves.easeOutCubic,
-    );
   }
 
-  /// Swipe settled on a new page → keep the nav bar in sync.
-  void _onPageChanged(int i) => setState(() {
-        _index = i;
-        _collapsed = false;
-        _addOpen = false;
-      });
+  /// Swipe settled on a new page → keep the shared tab state in sync.
+  void _onPageChanged(int i) {
+    ref.read(selectedTabProvider.notifier).state = i;
+    setState(() {
+      _collapsed = false;
+      _addOpen = false;
+    });
+  }
 
   void _toggleAdd() => setState(() => _addOpen = !_addOpen);
   void _closeAdd() {
@@ -133,6 +129,18 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
+    final index = ref.watch(selectedTabProvider);
+    // A screen requested a tab (or a nav tap set it): glide the pager there.
+    ref.listen<int>(selectedTabProvider, (_, next) {
+      if (_pageController.hasClients &&
+          (_pageController.page ?? 0).round() != next) {
+        _pageController.animateToPage(
+          next,
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    });
     return PopScope(
       // Back closes the quick-add panel first, before popping the app.
       canPop: !_addOpen,
@@ -177,7 +185,7 @@ class _AppShellState extends ConsumerState<AppShell> {
         ),
         bottomNavigationBar: _SlideBar(
           tabs: _tabs,
-          index: _index,
+          index: index,
           collapsed: _collapsed,
           addOpen: _addOpen,
           onTap: _select,

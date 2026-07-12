@@ -54,6 +54,15 @@
         android:name="android.permission.POST_NOTIFICATIONS"
         tools:targetApi="33" />
 
+    <!-- WorkManager killed-app sync (workmanager plugin → androidx.work). WorkManager needs a
+         wakelock to run the headless offload isolate, and RECEIVE_BOOT_COMPLETED to re-enqueue the
+         periodic job after a reboot. Both are also contributed by androidx.work's manifest merge;
+         declared here explicitly so the intent is visible and survives any merge suppression. The
+         WorkManagerInitializer provider, SystemJobService/SystemAlarmService components and the
+         plugin's POST_NOTIFICATIONS are supplied by the libraries — nothing else is needed here. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!-- BLE is used but not mandatory hardware (app also runs on desktop). -->
     <uses-feature
         android:name="android.hardware.bluetooth_le"
@@ -95,8 +104,9 @@
         <!-- flutter_foreground_task's persistent foreground service. The class name is fixed by
              the plugin (do not rename). connectedDevice type = we hold an active BLE link to the
              WHOOP strap; reuses the already-declared FOREGROUND_SERVICE(+_CONNECTED_DEVICE) perms.
-             stopWithTask=true so the service also ends if the user swipes the app away (we do not
-             claim reliable killed-app sync — see BackgroundSyncService docs). -->
+             stopWithTask=true so the service also ends if the user swipes the app away. Killed-app
+             sync is handled separately by the periodic WorkManager job (background_sync_worker.dart),
+             which wakes a headless isolate after the process is gone; the two complement each other. -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:foregroundServiceType="connectedDevice"

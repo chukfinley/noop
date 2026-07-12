@@ -40,6 +40,24 @@ class SyncState {
       'recordCount: $recordCount)';
 }
 
+/// Immutable snapshot of the LAST REAL strap battery reading we saw — persisted so
+/// the charge hero / Today pill can honestly show a timestamped past value while the
+/// strap is disconnected (a real reading "as of <time>", never a fabricated number).
+///   • [pct] — the battery fraction 0..1,
+///   • [at] — wall-clock time that reading arrived,
+///   • [charging] — whether it reported charging then (null = unknown).
+class LastKnownBattery {
+  const LastKnownBattery({required this.pct, required this.at, this.charging});
+
+  final double pct;
+  final DateTime at;
+  final bool? charging;
+
+  @override
+  String toString() =>
+      'LastKnownBattery(pct: $pct, at: $at, charging: $charging)';
+}
+
 /// Tiny persistence layer over [FlutterSecureStorage]. Values are loaded once at
 /// startup into memory so the rest of the app can read them synchronously;
 /// writes go through to storage. Every storage call is guarded — on platforms
@@ -82,6 +100,10 @@ class Prefs {
   static const _kLastSyncAt = 'last_sync_at_ms';
   static const _kLastSyncedRecordTs = 'last_synced_record_ts_ms';
   static const _kLastSyncRecordCount = 'last_sync_record_count';
+  static const _kDeviceNameOverride = 'device_name_override';
+  static const _kLastKnownBatteryPct = 'last_known_battery_pct';
+  static const _kLastKnownBatteryAt = 'last_known_battery_at_ms';
+  static const _kLastKnownCharging = 'last_known_charging';
 
   final FlutterSecureStorage _store = const FlutterSecureStorage();
 
@@ -182,6 +204,29 @@ class Prefs {
   int? lastSyncedRecordTsMs;
   int? lastSyncRecordCount;
 
+  /// User's manual rename override for the paired strap. Null → show the strap's own
+  /// real advertised name (never a hardcoded literal). Survives a restart so a rename
+  /// sticks; the DEFAULT display name still comes from the live strap, not this field.
+  String? deviceNameOverride;
+
+  /// The last REAL strap battery reading (0..1), the wall-clock ms it arrived, and its
+  /// charging flag. Persisted so a disconnected strap can show its last honest value
+  /// (timestamped, "as of X ago"). All null until a real reading has ever been seen.
+  double? lastKnownBatteryPct;
+  int? lastKnownBatteryAtMs;
+  bool? lastKnownCharging;
+
+  /// Reconstruct the immutable [LastKnownBattery] from the persisted fields, or null
+  /// when no real reading has ever been banked (→ the UI honestly shows "—").
+  LastKnownBattery? get lastKnownBattery =>
+      (lastKnownBatteryPct == null || lastKnownBatteryAtMs == null)
+          ? null
+          : LastKnownBattery(
+              pct: lastKnownBatteryPct!,
+              at: DateTime.fromMillisecondsSinceEpoch(lastKnownBatteryAtMs!),
+              charging: lastKnownCharging,
+            );
+
   /// Reconstruct the immutable [SyncState] value from the persisted fields.
   SyncState get syncState => SyncState(
         lastSyncAt: lastSyncAtMs == null
@@ -243,6 +288,12 @@ class Prefs {
       lastSyncAtMs = int.tryParse(all[_kLastSyncAt] ?? '');
       lastSyncedRecordTsMs = int.tryParse(all[_kLastSyncedRecordTs] ?? '');
       lastSyncRecordCount = int.tryParse(all[_kLastSyncRecordCount] ?? '');
+      final dno = all[_kDeviceNameOverride];
+      deviceNameOverride = (dno == null || dno.isEmpty) ? null : dno;
+      lastKnownBatteryPct = double.tryParse(all[_kLastKnownBatteryPct] ?? '');
+      lastKnownBatteryAtMs = int.tryParse(all[_kLastKnownBatteryAt] ?? '');
+      final lkc = all[_kLastKnownCharging];
+      lastKnownCharging = (lkc == null || lkc.isEmpty) ? null : lkc == 'true';
     } catch (e) {
       debugPrint('Prefs.load failed, using defaults: $e');
     }
@@ -420,6 +471,30 @@ class Prefs {
     await _write(_kLastSyncAt, atMs.toString());
     await _write(_kLastSyncedRecordTs, newestRecordTsMs?.toString() ?? '');
     await _write(_kLastSyncRecordCount, recordCount?.toString() ?? '');
+  }
+
+  /// Persist (or clear, when passed null/empty) the manual device-name override.
+  Future<void> setDeviceNameOverride(String? value) async {
+    final v = (value == null || value.trim().isEmpty) ? null : value.trim();
+    deviceNameOverride = v;
+    await _write(_kDeviceNameOverride, v ?? '');
+  }
+
+  /// Bank the latest REAL strap battery reading so a later disconnect can show it as a
+  /// timestamped last-known value. [pct] is the 0..1 fraction, [atMs] wall-clock now,
+  /// [charging] the reported charging flag (null = unknown).
+  Future<void> recordBatteryReading({
+    required double pct,
+    required int atMs,
+    bool? charging,
+  }) async {
+    lastKnownBatteryPct = pct.clamp(0.0, 1.0);
+    lastKnownBatteryAtMs = atMs;
+    lastKnownCharging = charging;
+    await _write(_kLastKnownBatteryPct, lastKnownBatteryPct!.toString());
+    await _write(_kLastKnownBatteryAt, atMs.toString());
+    await _write(
+        _kLastKnownCharging, charging == null ? '' : (charging ? 'true' : 'false'));
   }
 
   static Map<String, bool> _decodeBoolMap(String? raw) {

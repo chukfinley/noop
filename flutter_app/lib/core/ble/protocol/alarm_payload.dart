@@ -77,6 +77,27 @@ class AlarmPayload {
     return out;
   }
 
-  /// DISABLE_ALARM (cmd 69) REVISION_2 body `[0x02, 0xFF]` (the 5/MG form).
+  /// SET_ALARM_TIME (cmd 66) WHOOP 4.0 body — the hardware-confirmed **9-byte** form (real gen-4
+  /// btsnoop capture #535): `[alarmId][u32 LE epoch seconds][0x00,0x00][0x00,0x00]`.
+  ///
+  /// This is a DIFFERENT, shorter wire form than the 20-byte rev4 [build] used on WHOOP 5.0/MG. Unlike
+  /// rev4 (self-consistent but UNCONFIRMED to wake a strap), this 9-byte form is proven to buzz real
+  /// gen-4 firmware, so the caller may arm it WITHOUT the experimental opt-in. Select strictly by
+  /// device family — never unify the two forms onto rev4 without a fresh gen-4 capture.
+  static Uint8List buildWhoop4(int wakeEpochSeconds, {int alarmId = 1}) {
+    final s = wakeEpochSeconds;
+    return Uint8List.fromList(<int>[
+      alarmId & 0xFF,
+      s & 0xFF,
+      (s >> 8) & 0xFF,
+      (s >> 16) & 0xFF,
+      (s >> 24) & 0xFF,
+      0x00, 0x00,
+      0x00, 0x00,
+    ]);
+  }
+
+  /// DISABLE_ALARM (cmd 69) REVISION_2 body `[0x02, 0xFF]` (the 5/MG form; rev4 has no distinct
+  /// disable form, so the app clears a rev4-set alarm with this same rev2 sentinel).
   static Uint8List disableRev2() => Uint8List.fromList(<int>[0x02, 0xFF]);
 }

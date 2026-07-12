@@ -6,7 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:noop/core/data/models.dart';
 import 'package:noop/core/data/weather.dart';
 import 'package:noop/core/state/format.dart';
-import 'package:noop/core/state/prefs.dart' show EffortScale;
+import 'package:noop/core/state/prefs.dart' show EffortScale, LastKnownBattery;
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/core/ble/transport/whoop_providers.dart';
 import 'package:noop/shared/widgets/backgrounds.dart';
@@ -124,9 +124,10 @@ class TodayScreen extends ConsumerWidget {
         children: [
           reveal(_Scene(
             day: day,
-            // Live strap battery only — no mock fallback. Null (no live link)
-            // renders "—" in the pill rather than a fabricated number.
+            // Live strap battery when connected; else the last REAL persisted reading
+            // (shown timestamped, "87 · 2h ago"). Only "—" when there's never been one.
             battery: ref.watch(liveBatteryProvider).value,
+            lastKnownBattery: ref.watch(lastKnownBatteryProvider),
             isToday: idx == maxI,
             canPrev: idx > 0,
             canNext: idx < maxI,
@@ -278,6 +279,7 @@ class _DoneButton extends StatelessWidget {
 class _Scene extends StatelessWidget {
   final DayRecord day;
   final double? battery;
+  final LastKnownBattery? lastKnownBattery;
   final bool isToday;
   final bool canPrev;
   final bool canNext;
@@ -286,6 +288,7 @@ class _Scene extends StatelessWidget {
   const _Scene({
     required this.day,
     required this.battery,
+    required this.lastKnownBattery,
     required this.isToday,
     required this.canPrev,
     required this.canNext,
@@ -336,7 +339,8 @@ class _Scene extends StatelessWidget {
             child: GestureDetector(
               onTap: () => Navigator.of(context)
                   .push(noopRoute(const DeviceSettingsScreen())),
-              child: _StrapBattery(level: battery),
+              child: _StrapBattery(
+                  level: battery, lastKnown: lastKnownBattery),
             ),
           ),
         ),
@@ -397,14 +401,18 @@ class _HeartRatePill extends ConsumerWidget {
 
 class _StrapBattery extends StatelessWidget {
   final double? level;
-  const _StrapBattery({required this.level});
+  final LastKnownBattery? lastKnown;
+  const _StrapBattery({required this.level, this.lastKnown});
 
   @override
   Widget build(BuildContext context) {
-    // Honest: with no live strap reading show "—", not a fabricated percentage.
-    final connected = level != null;
-    final l = (level ?? 0).clamp(0.0, 1.0);
-    final color = !connected
+    // Live reading wins; else the last REAL persisted one (shown with an honest
+    // "· 2h ago" so it's never mistaken for live); only "—" when there's never been one.
+    final bool live = level != null;
+    final double? eff = level ?? lastKnown?.pct;
+    final bool has = eff != null;
+    final l = (eff ?? 0).clamp(0.0, 1.0);
+    final color = !has
         ? Palette.textTertiary
         : (l > 0.4
             ? Palette.statusPositive
@@ -418,14 +426,32 @@ class _StrapBattery extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _BatteryGlyph(level: connected ? l : 0, color: color),
+          _BatteryGlyph(level: has ? l : 0, color: color),
           const SizedBox(width: 5),
-          Text(connected ? '${(l * 100).round()}' : '—',
+          Text(has ? '${(l * 100).round()}' : '—',
               style: NoopType.captionNumber
                   .copyWith(color: Palette.textSecondary)),
+          // Stale (last-known) reading → append the honest relative age.
+          if (!live && has) ...[
+            const SizedBox(width: 4),
+            Text('· ${_agoShort(lastKnown!.at)}',
+                style:
+                    NoopType.caption.copyWith(color: Palette.textTertiary)),
+          ],
         ],
       ),
     );
+  }
+
+  /// Compact relative age for the pill ("now" / "5m ago" / "2h ago" / "3d ago"). A
+  /// future timestamp (clock skew) reads as "now". Local helper — Fmt has no relative
+  /// formatter and format.dart is out of scope here.
+  static String _agoShort(DateTime t) {
+    final d = DateTime.now().difference(t);
+    if (d.inMinutes < 1) return 'now';
+    if (d.inMinutes < 60) return '${d.inMinutes}m ago';
+    if (d.inHours < 24) return '${d.inHours}h ago';
+    return '${d.inDays}d ago';
   }
 }
 
@@ -570,7 +596,7 @@ class _Hero extends ConsumerWidget {
   const _Hero({required this.day, this.editing = false});
 
   /// The gauge cell for a trio [id], or null for an unknown id.
-  Widget? _cell(String id, BuildContext context) {
+  Widget? _cell(String id, BuildContext context, WidgetRef ref) {
     switch (id) {
       case 'recovery':
         return _HeroCell(
@@ -596,7 +622,12 @@ class _Hero extends ConsumerWidget {
           value: day.rest,
           ramp: Palette.restGradientStops,
           color: Palette.restColor,
-          onTap: editing ? null : () => _openDetail(context, MetricKind.sleep),
+          // Sleep has its own tab — jump straight to it in the bottom nav
+          // instead of pushing a separate detail screen.
+          onTap: editing
+              ? null
+              : () => ref.read(selectedTabProvider.notifier).state =
+                  kSleepTabIndex,
         );
     }
     return null;
@@ -607,7 +638,7 @@ class _Hero extends ConsumerWidget {
     final layout = ref.watch(cardsLayoutProvider);
     final visibleIds = [
       for (final cfg in layout)
-        if (cfg.visible && _cell(cfg.id, context) != null) cfg.id,
+        if (cfg.visible && _cell(cfg.id, context, ref) != null) cfg.id,
     ];
     if (visibleIds.isEmpty) return const SizedBox.shrink();
 
@@ -619,7 +650,7 @@ class _Hero extends ConsumerWidget {
           columns: visibleIds.length,
           cellHeight: 118,
           spacing: 0,
-          builder: (id) => _cell(id, context) ?? const SizedBox.shrink(),
+          builder: (id) => _cell(id, context, ref) ?? const SizedBox.shrink(),
           onOrder: (order) =>
               ref.read(cardsLayoutProvider.notifier).setVisibleOrder(order),
         ),
@@ -629,7 +660,7 @@ class _Hero extends ConsumerWidget {
     final cells = <Widget>[];
     for (final id in visibleIds) {
       if (cells.isNotEmpty) cells.add(const _CellDivider());
-      cells.add(Expanded(child: _cell(id, context)!));
+      cells.add(Expanded(child: _cell(id, context, ref)!));
     }
     return _GlassPanel(
       child: IntrinsicHeight(

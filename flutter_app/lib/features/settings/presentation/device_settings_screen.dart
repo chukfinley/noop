@@ -1,7 +1,10 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:noop/core/ble/background/background_sync_service.dart';
 import 'package:noop/core/ble/broadcast/hr_broadcast.dart';
 import 'package:noop/core/ble/protocol/device_family.dart';
 import 'package:noop/core/ble/transport/whoop_ble_client.dart'
@@ -13,7 +16,8 @@ import 'package:noop/core/ble/transport/whoop_ble_client.dart'
         SyncProgress;
 import 'package:noop/core/ble/transport/whoop_providers.dart';
 import 'package:noop/core/state/format.dart';
-import 'package:noop/core/state/prefs.dart' show SyncState;
+import 'package:noop/core/state/prefs.dart'
+    show LastKnownBattery, Prefs, SyncState;
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/features/alarm/presentation/alarms_screen.dart';
 import 'package:noop/shared/widgets/behavior.dart';
@@ -26,7 +30,12 @@ import 'package:noop/shared/widgets/settings_tiles.dart';
 import 'package:noop/core/theme/metrics.dart';
 import 'package:noop/core/theme/palette.dart';
 
-final _deviceName = StateProvider<String>((_) => 'Band 4');
+/// The user's manual rename override for the strap (null = show the strap's own real
+/// advertised name). Seeded from [Prefs] so a rename survives a restart; the DEFAULT
+/// display name comes from the real paired strap via [DeviceSettingsScreen.resolveDeviceName],
+/// never a hardcoded literal.
+final _deviceNameOverride =
+    StateProvider<String?>((_) => Prefs.instance.deviceNameOverride);
 
 /// Device settings — the strap's LIVE charge, connection, sync status, rename,
 /// firmware entry and a broadcast-heart-rate switch. Opened from the battery
@@ -58,20 +67,27 @@ class DeviceSettingsScreen extends ConsumerWidget {
     final linked = _isLinked(conn);
     final busy = _isBusy(conn);
 
-    // Battery + charging come STRICTLY from the live strap — no mock fallback.
-    // With no link the hero honestly shows "—" / "Not connected" (never fake a
-    // number, and never derive "charging" from percent<100).
+    // Battery + charging: the LIVE strap reading wins; with no live link we fall back
+    // to the last REAL persisted reading (a timestamped past value, "as of X ago" — not
+    // a mock), and only show "—" / "Not connected" when there has genuinely never been
+    // one. Charging is never derived from percent<100.
     final double? liveBattery = ref.watch(liveBatteryProvider).value;
-    final bool? charging = ref.watch(liveChargingProvider).value;
-    final bool hasBattery = liveBattery != null;
-    final double level = (liveBattery ?? 0).clamp(0.0, 1.0);
+    final bool? liveCharging = ref.watch(liveChargingProvider).value;
+    final LastKnownBattery? lastKnown = ref.watch(lastKnownBatteryProvider);
+    final bool hasLive = liveBattery != null;
+    final double? effBattery = liveBattery ?? lastKnown?.pct;
+    final bool hasBattery = effBattery != null;
+    final bool isStale = !hasLive && lastKnown != null;
+    final bool? charging = hasLive ? liveCharging : lastKnown?.charging;
+    final double level = (effBattery ?? 0).clamp(0.0, 1.0);
     final int pct = (level * 100).round();
 
     final liveHr = ref.watch(liveHrProvider).value;
     final sync = ref.watch(syncProgressProvider).value;
     final paired = ref.watch(pairedStrapProvider);
     final broadcast = ref.watch(hrBroadcastEnabledProvider);
-    final name = ref.watch(_deviceName);
+    final bgSync = ref.watch(backgroundSyncEnabledProvider);
+    final name = resolveDeviceName(paired, ref.watch(_deviceNameOverride));
     final syncState = ref.watch(syncStateProvider);
     final style = ref.watch(gaugeStyleProvider);
 
@@ -118,32 +134,41 @@ class DeviceSettingsScreen extends ConsumerWidget {
               Text(name,
                   style: NoopType.title2.copyWith(color: Palette.textPrimary)),
               const SizedBox(height: Metrics.space8),
-              // Charging line ONLY when the strap actually reports it. No live
-              // battery → "Not connected"; charging == null → omit the line.
+              // Charging line ONLY when it's actually reported. No reading at all →
+              // "Not connected"; a stale (last-known) reading adds an honest "As of X
+              // ago" qualifier so the number is never mistaken for live.
               if (!hasBattery)
                 Text('Not connected',
                     style:
                         NoopType.subhead.copyWith(color: Palette.textTertiary))
-              else if (charging != null)
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                        charging
-                            ? Icons.bolt_rounded
-                            : Icons.battery_std_rounded,
-                        size: 15,
-                        color: charging
-                            ? Palette.statusPositive
-                            : Palette.textSecondary),
-                    const SizedBox(width: 5),
-                    Text(charging ? 'Charging' : 'On battery',
-                        style: NoopType.subhead.copyWith(
-                            color: charging
-                                ? Palette.statusPositive
-                                : Palette.textSecondary)),
-                  ],
-                ),
+              else ...[
+                if (charging != null)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                          charging
+                              ? Icons.bolt_rounded
+                              : Icons.battery_std_rounded,
+                          size: 15,
+                          color: charging
+                              ? Palette.statusPositive
+                              : Palette.textSecondary),
+                      const SizedBox(width: 5),
+                      Text(charging ? 'Charging' : 'On battery',
+                          style: NoopType.subhead.copyWith(
+                              color: charging
+                                  ? Palette.statusPositive
+                                  : Palette.textSecondary)),
+                    ],
+                  ),
+                if (isStale) ...[
+                  if (charging != null) const SizedBox(height: 4),
+                  Text('As of ${_relativeTime(lastKnown.at)}',
+                      style: NoopType.footnote
+                          .copyWith(color: Palette.textTertiary)),
+                ],
+              ],
             ],
           ),
         ),
@@ -267,6 +292,35 @@ class DeviceSettingsScreen extends ConsumerWidget {
               ),
         ]),
 
+        // ── Background sync ─────────────────────────────────────────────────
+        // Only meaningful with a strap remembered — hidden until one is paired.
+        // Toggling persists the choice (Prefs) AND starts/stops the Android
+        // foreground service that keeps the strap syncing while backgrounded.
+        // The service is a strict no-op off Android (and in tests), so this
+        // tile is inert everywhere but a real Android device.
+        if (paired != null)
+          SettingsGroup('Background', Palette.metricCyan, [
+            (r) => SettingsTile(
+                  radius: r,
+                  icon: Icons.sync_rounded,
+                  iconColor: bgSync ? Palette.metricCyan : Palette.textTertiary,
+                  title: 'Background sync',
+                  detail:
+                      'Keep syncing your strap while the app is in the background '
+                      '(Android). For reliability, allow NOOP to ignore battery '
+                      'optimisation in system settings.',
+                  trailing: NoopToggle(
+                    value: bgSync,
+                    onChanged: (v) => _setBackgroundSync(ref, v),
+                  ),
+                  below: _StatusDot(
+                    label: bgSync ? 'On · syncing in the background' : 'Off',
+                    color:
+                        bgSync ? Palette.statusPositive : Palette.textTertiary,
+                  ),
+                ),
+          ]),
+
         // ── Connection log (live scan/connect/offload/disconnect trace) ──────
         const _ConnectionLogSection(),
       ],
@@ -343,6 +397,15 @@ class DeviceSettingsScreen extends ConsumerWidget {
   static String _familyLabel(DeviceFamily f) =>
       f == DeviceFamily.whoop5 ? 'WHOOP 5·MG' : 'WHOOP 4.0';
 
+  /// Resolve the device display name. A manual rename [override] wins, then the strap's
+  /// own REAL advertised name, then its family label, and only "WHOOP" when nothing at
+  /// all is known — never a hardcoded "Band 4".
+  static String resolveDeviceName(PairedStrap? paired, String? override) =>
+      override ??
+      paired?.name ??
+      (paired == null ? null : _familyLabel(paired.family)) ??
+      'WHOOP';
+
   /// Forget the remembered band: clear it from Prefs (via [forgetPairedStrap]) so
   /// the screen returns to the un-paired "Scan for straps" state. Drops any live
   /// link first so we don't keep talking to a band the user just un-paired.
@@ -351,6 +414,17 @@ class DeviceSettingsScreen extends ConsumerWidget {
     await forgetPairedStrap(ref);
     if (!context.mounted) return;
     noopToast(context, 'Band forgotten');
+  }
+
+  /// Flip the background-sync preference: update the provider (so the tile
+  /// reflects it immediately), persist the explicit choice to [Prefs], and
+  /// start/stop the Android foreground service accordingly. The service is a
+  /// strict no-op off Android and in tests, so this stays inert there.
+  static void _setBackgroundSync(WidgetRef ref, bool value) {
+    ref.read(backgroundSyncEnabledProvider.notifier).state = value;
+    unawaited(Prefs.instance.setBackgroundSyncEnabled(value));
+    final service = ref.read(backgroundSyncServiceProvider);
+    unawaited(value ? service.start() : service.stop());
   }
 
   /// Automatic connect: `connectRemembered()` reconnects the remembered band, or
@@ -404,13 +478,17 @@ class DeviceSettingsScreen extends ConsumerWidget {
     }
     final at = syncState.lastSyncAt;
     if (at == null) return 'Never synced';
-    final rel = _relativeTime(at);
+    final rel = _relativeStamp(at);
     final count = syncState.recordCount;
     if (count != null && count > 0) {
       return 'Last synced $rel · ${Fmt.intComma(count)} records';
     }
     return 'Last synced $rel';
   }
+
+  /// A relative day + the clock TIME ("just now · 07:42" / "2 days ago · 23:15"), so
+  /// the sync line carries the time-of-day, not only the date. Uses the real DateTime.
+  static String _relativeStamp(DateTime t) => '${_relativeTime(t)} · ${Fmt.clock(t)}';
 
   /// A compact human relative time ("just now" / "2 minutes ago" / "3 days ago").
   /// Local helper — Fmt has no relative formatter and format.dart is out of scope
@@ -528,7 +606,8 @@ class DeviceSettingsScreen extends ConsumerWidget {
                     NoopType.number(22).copyWith(color: Palette.textPrimary)),
             if (current != null) ...[
               const SizedBox(height: 2),
-              Text('Syncing ${Fmt.longDate(at(current))}',
+              Text(
+                  'Syncing ${Fmt.longDate(at(current))} · ${Fmt.clock(at(current))}',
                   style:
                       NoopType.caption.copyWith(color: Palette.textTertiary)),
             ],
@@ -683,7 +762,10 @@ class DeviceSettingsScreen extends ConsumerWidget {
         ],
       ),
     );
-    if (result != null) ref.read(_deviceName.notifier).state = result;
+    if (result != null) {
+      ref.read(_deviceNameOverride.notifier).state = result;
+      unawaited(Prefs.instance.setDeviceNameOverride(result));
+    }
   }
 }
 

@@ -61,9 +61,39 @@ final whoopBleClientProvider = Provider<WhoopBleClient>((ref) {
     }
   });
   ref.onDispose(syncSub.cancel);
+  // Last-known battery persistence: bank each FRESH real reading (0..1) with a
+  // wall-clock stamp, so a later disconnect can honestly show the last real value
+  // ("87% · 2h ago") instead of "—". Charging is tracked from its own stream and
+  // folded into the persisted reading. Non-null only — a disconnect (null) never
+  // overwrites the last real reading. Inert in tests (no device → no reading ever).
+  bool? lastCharging;
+  final chargingSub = client.charging.listen((c) {
+    if (c != null) lastCharging = c;
+  });
+  final batterySub = client.battery.listen((b) {
+    if (b != null) {
+      unawaited(Prefs.instance
+          .recordBatteryReading(
+            pct: b,
+            atMs: DateTime.now().millisecondsSinceEpoch,
+            charging: lastCharging,
+          )
+          .then((_) => ref.invalidate(lastKnownBatteryProvider)));
+    }
+  });
+  ref.onDispose(chargingSub.cancel);
+  ref.onDispose(batterySub.cancel);
   ref.onDispose(client.dispose);
   return client;
 });
+
+/// The persisted [LastKnownBattery] — the last REAL strap battery reading + when it
+/// arrived + its charging flag, or null when no reading has ever been seen. Reads
+/// [Prefs] synchronously, so it is inert in tests (no device → null → an honest "—").
+/// [whoopBleClientProvider] invalidates this on each fresh reading, so a fresh watch
+/// reflects the latest value.
+final lastKnownBatteryProvider =
+    Provider<LastKnownBattery?>((ref) => Prefs.instance.lastKnownBattery);
 
 /// The persisted [SyncState] — WHEN the strap last finished an offload, the newest
 /// record we banked, and that sync's record count. Reads [Prefs] synchronously, so it

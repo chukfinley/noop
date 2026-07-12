@@ -34,7 +34,11 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
+import '../bond/bond_refusal_give_up.dart';
+import '../bond/bond_watchdog_backoff.dart';
+import '../bond/post_bond_timeout_loop_detector.dart';
 import '../permissions.dart';
+import '../protocol/alarm_payload.dart';
 import '../protocol/device_family.dart';
 import '../protocol/enums.dart';
 import '../protocol/framing.dart';
@@ -170,6 +174,23 @@ class ConnLogEntry {
   String toString() => 'ConnLogEntry($ts, $message)';
 }
 
+/// A strap-reported firmware wake-alarm, decoded defensively from a GET_ALARM_TIME (cmd 67) response
+/// (smart-alarm spec §3). [wakeEpochMs] is the next wake time the strap says it will fire. The
+/// response layout is UNDOCUMENTED, so this is best-effort telemetry only — never gate behaviour on it
+/// (a null [StrapAlarm] just means "nothing plausible decoded", not "no alarm").
+class StrapAlarm {
+  const StrapAlarm({required this.wakeEpochMs});
+
+  /// The strap's next wake time as unix milliseconds (already passed the plausibility gate).
+  final int wakeEpochMs;
+
+  /// The decoded wake time as a local [DateTime].
+  DateTime get wake => DateTime.fromMillisecondsSinceEpoch(wakeEpochMs);
+
+  @override
+  String toString() => 'StrapAlarm(wake: ${wake.toIso8601String()})';
+}
+
 /// The default device id every persisted row is stamped with (matches the Kotlin `DEFAULT_DEVICE_ID`).
 const String kDefaultWhoopDeviceId = 'my-whoop';
 
@@ -251,6 +272,15 @@ class WhoopBleClient {
   final _syncController = StreamController<SyncProgress>.broadcast();
   final _pairedController = StreamController<PairedStrap?>.broadcast();
   final _logController = StreamController<List<ConnLogEntry>>.broadcast();
+  // ── strap smart-alarm signals (smart-alarm spec §5) ─────────────────────────────────────────
+  /// Emits when the strap ACKs a SET_ALARM_TIME (cmd 66) — for WHOOP4 a completed write-with-response,
+  /// for 5/MG a COMMAND_RESPONSE with result=SUCCESS. The write-side flips queued→armed ONLY on this
+  /// real ACK (never optimistically).
+  final _alarmArmedController = StreamController<void>.broadcast();
+  /// Emits on a LIVE STRAP_DRIVEN_ALARM_EXECUTED (event 57) — the strap ran its own wake haptic.
+  final _alarmFiredController = StreamController<void>.broadcast();
+  /// Emits the defensively-decoded GET_ALARM_TIME readback epoch (ms), or null — log/telemetry only.
+  final _alarmReadbackController = StreamController<int?>.broadcast();
 
   // ── connection log (rolling in-memory trace of every _log line) ─────────────────────────────
   /// Newest-last rolling buffer, capped at [_maxLogEntries]. Stays empty until the first [_log]
@@ -264,8 +294,32 @@ class WhoopBleClient {
   /// transport stays Prefs/Riverpod-free; null (the default) means "nothing remembered".
   PairedStrap? Function()? rememberedStrapLookup;
 
+  /// EXPERIMENTAL opt-in gate for the UNCONFIRMED WHOOP 5.0/MG rev4 strap alarm (smart-alarm spec
+  /// §2.3/§7). Consulted by [setStrapAlarm] on a 5/MG strap: when this returns false (the default —
+  /// null callback ⇒ closed gate), arming is SKIPPED because we have never captured a
+  /// STRAP_DRIVEN_ALARM_EXECUTED on our own 5/MG, so a user must not rely on it. WHOOP4's hardware-
+  /// confirmed 9-byte form is never gated. Disable is always allowed. The provider layer wires this to
+  /// the experimental-features opt-in; kept as a callback so the transport stays Prefs/Riverpod-free.
+  bool Function()? experimentalWhoop5AlarmOptIn;
+
+  /// Injected by the write-side ([AlarmService]): returns the next wake [DateTime] to arm on the strap
+  /// when a link comes up (the earliest enabled alarm's next occurrence), or null when no alarm is
+  /// enabled. Consulted by the connect lifecycle (after SET_CLOCK) so a reconnect re-pushes the alarm.
+  /// Kept as a callback so the transport stays Prefs/Riverpod-free (twin of [rememberedStrapLookup]);
+  /// null (the default) means "nothing to reconcile".
+  DateTime? Function()? strapAlarmReconcileLookup;
+
   /// Live link state (idle/scanning/connecting/connected/syncing).
   Stream<BleConnectionState> get connectionState => _connController.stream;
+
+  /// Fires when the strap confirms it armed a SET_ALARM_TIME (the queued→armed transition source).
+  Stream<void> get alarmArmed => _alarmArmedController.stream;
+
+  /// Fires when the strap ran its own wake haptic (live event 57) — the source of the "fired" state.
+  Stream<void> get alarmFired => _alarmFiredController.stream;
+
+  /// The last defensively-decoded GET_ALARM_TIME readback (epoch ms, or null). Telemetry only.
+  Stream<int?> get alarmReadback => _alarmReadbackController.stream;
 
   /// Live heart rate (bpm) or null when unknown. Sourced from the standard 0x2A37 profile and from
   /// REALTIME_DATA frames on the custom channel.
@@ -301,6 +355,30 @@ class WhoopBleClient {
   /// Last human-readable error surfaced (permissions denied, adapter off, not found, …). null = none.
   String? lastError;
 
+  // ── bond hardening (Android bonding stack, ported from the Kotlin WhoopBleClient) ───────────
+  /// Minimum time since the bond-loop pause tripped (or since the last probe) before another salvage
+  /// probe may fire (#78 hole-4). 10 minutes: long enough that a still-held strap sees a handful of
+  /// bounded attempts per day, short enough that a strap the user freed reconnects on the next natural
+  /// app open. Twin of the Kotlin `BOND_LOOP_SALVAGE_FLOOR_MS`.
+  static const int bondLoopSalvageFloorMs = 10 * 60 * 1000;
+
+  /// Pure gate for the one-shot bond-loop salvage probe (#78 hole-4): probe ONLY while the pause is
+  /// latched, with no live link, no user teardown in force, and at least [bondLoopSalvageFloorMs] since
+  /// the pause tripped (or since the previous probe re-stamped it). null ms = no trip timestamp = never
+  /// probe. Pure so the never-hammer contract is pinned by unit tests. Twin of the Kotlin
+  /// `WhoopBleClient.shouldSalvageProbe`.
+  static bool shouldSalvageProbe({
+    required bool pausedForBondLoop,
+    required bool connected,
+    required bool intentionalDisconnect,
+    required int? msSincePauseTripped,
+  }) =>
+      pausedForBondLoop &&
+      !connected &&
+      !intentionalDisconnect &&
+      msSincePauseTripped != null &&
+      msSincePauseTripped >= bondLoopSalvageFloorMs;
+
   int? _hrNow;
   double? _batteryNow;
   bool? _chargingNow;
@@ -325,6 +403,23 @@ class WhoopBleClient {
   bool _intentionalDisconnect = false;
   bool _connected = false;
   int _reconnectAttempt = 0;
+
+  // ── bond hardening state (Android only; inert off-device and in tests) ──────────────────────
+  /// #971 bond-handshake watchdog pacer: escalates the createBond window per consecutive bounce and
+  /// gives up after a capped number of tries.
+  final BondWatchdogBackoff _bondWatchdog = BondWatchdogBackoff();
+  /// #747/#750 give-up: pauses auto-reconnect + writes the epitaph after N consecutive bond refusals.
+  final BondRefusalGiveUp _bondGiveUp = BondRefusalGiveUp();
+  /// #617 detector: trips on consecutive bond-then-quick-timeout cycles (a WHOOP-4 bond loop).
+  final PostBondTimeoutLoopDetector _postBondLoop = PostBondTimeoutLoopDetector();
+  /// Whether the CURRENT connection reached a genuine bond (drives the loop detector's msSinceBond).
+  bool _didBond = false;
+  /// Wall-clock (epoch ms) when the current connection bonded, for the loop detector's quick-timeout test.
+  int? _bondedAtMs;
+  /// True while auto-reconnect is PAUSED by a bond give-up / loop trip — the reconnect path skips it.
+  bool _autoReconnectPausedForBondLoop = false;
+  /// When the bond-loop pause last tripped (epoch ms), feeding [shouldSalvageProbe]; null when clear.
+  int? _bondLoopPausedAtMs;
 
   Timer? _scanFallbackTimer;
   Timer? _liveFlushTimer;
@@ -363,6 +458,7 @@ class WhoopBleClient {
     _intentionalDisconnect = false;
     lastError = null;
     _pairedName = null;
+    _resetBondStateForUserAction(); // an explicit Connect re-arms the bond give-up / loop pause
 
     // Runtime permission gate first (mirrors the Kotlin caller contract).
     final granted = await ensureBlePermissions();
@@ -555,6 +651,7 @@ class WhoopBleClient {
     }
     _intentionalDisconnect = false;
     lastError = null;
+    _resetBondStateForUserAction(); // an explicit pick re-arms the bond give-up / loop pause
 
     final granted = await ensureBlePermissions();
     if (!granted) {
@@ -602,6 +699,11 @@ class WhoopBleClient {
       await connect();
       return;
     }
+    // Honour a latched bond-loop pause: auto-reconnect is allowed only as a bounded salvage probe.
+    if (!_allowAutoReconnectWhilePaused()) {
+      _setState(BleConnectionState.idle);
+      return;
+    }
     _intentionalDisconnect = false;
     lastError = null;
 
@@ -636,10 +738,155 @@ class WhoopBleClient {
   /// Intentional teardown: stop scanning, drop the link, and DO NOT auto-reconnect.
   Future<void> disconnect() async {
     _intentionalDisconnect = true;
+    _resetBondStateForUserAction(); // an explicit disconnect clears any latched bond-loop pause
     _log('Disconnect requested — dropping the link (no auto-reconnect)');
     _cancelTimers();
     await _teardownConnection();
     _setState(BleConnectionState.idle);
+  }
+
+  /// While the bond-loop pause is latched, auto-reconnect is allowed ONLY as a bounded salvage probe,
+  /// at most once per [bondLoopSalvageFloorMs] (#78 hole-4): a strap the user has since freed self-heals
+  /// on the next app-foreground, while a still-held strap gets at most one bounded attempt per floor
+  /// window (the give-up stays latched throughout — a genuine bond on the probe is what fully clears it
+  /// via [_onGenuineBond]). Returns true if the caller may proceed (re-stamping the floor so the next
+  /// probe waits another window); false to stay paused. Not paused → always proceed.
+  bool _allowAutoReconnectWhilePaused() {
+    if (!_autoReconnectPausedForBondLoop) return true;
+    final since = _bondLoopPausedAtMs == null
+        ? null
+        : DateTime.now().millisecondsSinceEpoch - _bondLoopPausedAtMs!;
+    if (!shouldSalvageProbe(
+      pausedForBondLoop: _autoReconnectPausedForBondLoop,
+      connected: _connected,
+      intentionalDisconnect: _intentionalDisconnect,
+      msSincePauseTripped: since,
+    )) {
+      _log('bond-loop pause latched — skipping auto-reconnect (salvage floor not reached)');
+      return false;
+    }
+    _bondLoopPausedAtMs = DateTime.now().millisecondsSinceEpoch; // re-stamp: next probe waits a floor
+    _log('bond-loop salvage probe: one bounded reconnect attempt while paused (#78)');
+    return true;
+  }
+
+  /// A user-initiated connect/disconnect re-arms the whole bond hardening stack: clears the refusal /
+  /// watchdog / loop streaks and lifts any latched auto-reconnect pause, so a fresh tap always retries
+  /// the bond from a clean slate (mirrors the Kotlin `clearPairingHint`).
+  void _resetBondStateForUserAction() {
+    _bondWatchdog.reset();
+    _bondGiveUp.reset();
+    _postBondLoop.reset();
+    _autoReconnectPausedForBondLoop = false;
+    _bondLoopPausedAtMs = null;
+  }
+
+  // ============================================================================================
+  // Strap smart-alarm (program the strap's own firmware wake alarm — smart-alarm spec §2-§5)
+  // ============================================================================================
+
+  /// Program (or clear) the strap's own firmware wake alarm over BLE (spec §2/§4). It fires the wake
+  /// haptic on the strap's own RTC even with the phone away.
+  ///
+  /// - `enabled == false` → send DISABLE_ALARM (cmd 69, `[0x02,0xFF]`) to clear the single slot. Always
+  ///   allowed (a no-op on a strap with no alarm).
+  /// - WHOOP 4.0 → the hardware-confirmed 9-byte form ([AlarmPayload.buildWhoop4]); a completed
+  ///   write-with-response is the arm ACK.
+  /// - WHOOP 5.0/MG → the 20-byte rev4 form ([AlarmPayload.build]), GATED behind
+  ///   [experimentalWhoop5AlarmOptIn] (UNCONFIRMED to wake real hardware, spec §7). When not opted in,
+  ///   arming is skipped (the alarm honestly stays queued); the queued→armed flip waits for a
+  ///   COMMAND_RESPONSE result=SUCCESS.
+  ///
+  /// Safe with no device: when there is no command characteristic (disconnected) this no-ops, so the
+  /// write-side status stays "queued". Also fires a log-only GET_ALARM_TIME readback (spec §3).
+  Future<void> setStrapAlarm(DateTime wake, {bool enabled = true}) async {
+    final ch = _cmdChar;
+    if (ch == null) {
+      _log('setStrapAlarm ignored — no strap link (alarm stays queued)');
+      return;
+    }
+    if (!enabled) {
+      _log('Strap alarm: DISABLE_ALARM (clearing the firmware slot)');
+      unawaited(_write(ch, _frameFor(CommandNumber.disableAlarm, AlarmPayload.disableRev2())));
+      return;
+    }
+    final Uint8List payload;
+    if (_family == DeviceFamily.whoop5) {
+      if (!(experimentalWhoop5AlarmOptIn?.call() ?? false)) {
+        _log('Strap alarm: WHOOP 5/MG rev4 alarm is experimental & not opted in — not arming (spec §7)');
+        return;
+      }
+      payload = AlarmPayload.build(wake.millisecondsSinceEpoch);
+    } else {
+      payload = AlarmPayload.buildWhoop4(wake.millisecondsSinceEpoch ~/ 1000);
+    }
+    _log('Strap alarm: SET_ALARM_TIME ${wake.toIso8601String()} '
+        '(${_family.name}, ${payload.length}-byte payload)');
+    final ok = await _writeChecked(ch, _frameFor(CommandNumber.setAlarmTime, payload));
+    // WHOOP4: a completed write-with-response IS the arm ACK (the strap sends no CR for cmd 66). 5/MG
+    // waits for the COMMAND_RESPONSE result=SUCCESS in [_handleCommandResponse] before declaring armed.
+    if (ok && _family == DeviceFamily.whoop4) _emitAlarmArmed();
+    // Log-only readback — decoded defensively, never gates behaviour (spec §3).
+    unawaited(_write(ch, _frameFor(CommandNumber.getAlarmTime, _alarmReadbackRequest())));
+  }
+
+  /// Read back the strap's armed alarm (GET_ALARM_TIME, cmd 67). Sends the request and awaits the next
+  /// defensively-decoded [alarmReadback] emission (short timeout). Returns null on anything unexpected —
+  /// the response layout is undocumented, so this NEVER crashes or gates behaviour (spec §3).
+  Future<StrapAlarm?> getStrapAlarm() async {
+    final ch = _cmdChar;
+    if (ch == null) {
+      _log('getStrapAlarm ignored — no strap link');
+      return null;
+    }
+    // Attach the listener BEFORE sending so we can't miss the reply.
+    final pending = alarmReadback.first
+        .timeout(const Duration(seconds: 3), onTimeout: () => null)
+        .catchError((Object _) => null);
+    unawaited(_write(ch, _frameFor(CommandNumber.getAlarmTime, _alarmReadbackRequest())));
+    final epochMs = await pending;
+    return epochMs == null ? null : StrapAlarm(wakeEpochMs: epochMs);
+  }
+
+  /// GET_ALARM_TIME request payload per family: `[0x04,0x01]` (rev4, alarmId 1) for 5/MG, `[0x01]` for
+  /// WHOOP4 (spec §3.1).
+  List<int> _alarmReadbackRequest() =>
+      _family == DeviceFamily.whoop5 ? const [0x04, 0x01] : const [0x01];
+
+  void _emitAlarmArmed() {
+    _log('Strap alarm armed — SET_ALARM_TIME acked by the strap');
+    if (!_alarmArmedController.isClosed) _alarmArmedController.add(null);
+  }
+
+  // Plausibility window for a decoded alarm epoch (SECONDS): 2017-07 … 2100 (spec §3.2).
+  static const int _alarmEpochFloor = 1500000000;
+  static const int _alarmEpochCeil = 4102444800;
+
+  /// Defensive GET_ALARM_TIME response decoder (spec §3.2) — port of the Kotlin `whoop4ArmedAlarmEpoch`
+  /// + plausibility gate. Payload starts after the COMMAND_RESPONSE header (abs offset 9 on WHOOP4, 13
+  /// on 5/MG). Tries two shapes, first plausible wins: (1) SET-mirror `[0x01][u32 LE epoch]`, (2) bare
+  /// `u32 LE epoch`. Returns epoch MILLIS, or null when nothing plausible decodes (never throws).
+  int? _decodeArmedAlarmEpochMs(Uint8List frame) {
+    final payOff = _family == DeviceFamily.whoop5 ? 13 : 9;
+    // Shape 1: SET-mirror — a leading 0x01 then the u32 LE epoch.
+    if (payOff < frame.length && (frame[payOff] & 0xFF) == 0x01) {
+      final e = _u32le(frame, payOff + 1);
+      if (e != null && e >= _alarmEpochFloor && e <= _alarmEpochCeil) return e * 1000;
+    }
+    // Shape 2: a bare u32 LE epoch at the payload start.
+    final e = _u32le(frame, payOff);
+    if (e != null && e >= _alarmEpochFloor && e <= _alarmEpochCeil) return e * 1000;
+    return null;
+  }
+
+  static int? _u8f(Uint8List f, int off) => off < f.length ? f[off] & 0xFF : null;
+
+  static int? _u32le(Uint8List f, int off) {
+    if (off < 0 || off + 4 > f.length) return null;
+    return (f[off] & 0xFF) |
+        ((f[off + 1] & 0xFF) << 8) |
+        ((f[off + 2] & 0xFF) << 16) |
+        ((f[off + 3] & 0xFF) << 24);
   }
 
   /// Release all resources. Safe to call multiple times.
@@ -654,6 +901,9 @@ class WhoopBleClient {
     await _syncController.close();
     await _pairedController.close();
     await _logController.close();
+    await _alarmArmedController.close();
+    await _alarmFiredController.close();
+    await _alarmReadbackController.close();
   }
 
   // ============================================================================================
@@ -797,6 +1047,8 @@ class WhoopBleClient {
   Future<void> _onConnected(BluetoothDevice device) async {
     if (_connected) return; // guard against duplicate connected events
     _connected = true;
+    _didBond = false; // each fresh connection starts unbonded until proven (drives the loop detector)
+    _bondedAtMs = null;
     _reconnectAttempt = 0; // a real connect clears the backoff (Kotlin resetReconnectBackoff)
     _reassembler.reset();
     _log('Connected — discovering services');
@@ -840,6 +1092,22 @@ class WhoopBleClient {
       await _subscribe(battChar, (v) => _onStandardBattery(v));
     }
 
+    // Ensure the strap is BONDED before enabling the WHOOP custom notify CCCDs. The encrypted custom
+    // characteristics only stream on a bonded link; a fresh (never-paired) WHOOP otherwise wedges in
+    // "finishing the secure handshake" and loops. Android-only (iOS/CoreBluetooth owns pairing) and
+    // inert off-device; on a give-up / bond loop this returns false and we stop the bring-up.
+    final bonded = await _ensureBonded(device);
+    if (!bonded) {
+      // Drop the wedged link. If the bond give-up / loop detector latched the pause, [_onDisconnected]
+      // skips the reconnect; otherwise it backoff-reconnects and retries with a wider bond window.
+      if (_blePlatform) {
+        try {
+          await device.disconnect();
+        } catch (_) {}
+      }
+      return;
+    }
+
     if (_family == DeviceFamily.whoop5) {
       await _bringUpWhoop5(custom);
     } else {
@@ -856,6 +1124,114 @@ class WhoopBleClient {
     ));
     _startLiveFlushTimer();
     _runConnectHandshake();
+    _reconcileStrapAlarmOnConnect();
+  }
+
+  /// After the connect handshake (so SET_CLOCK has latched the strap RTC — the alarm fires on the
+  /// strap's own clock, spec §6.1) push the write-side's currently-enabled alarm to the strap. No-op
+  /// when nothing is enabled or no lookup is wired. The SET ack flips the write-side queued→armed via
+  /// [alarmArmed]; on 5/MG without the experimental opt-in [setStrapAlarm] skips arming (stays queued).
+  void _reconcileStrapAlarmOnConnect() {
+    final wake = strapAlarmReconcileLookup?.call();
+    if (wake == null) {
+      _log('Strap alarm: nothing enabled to reconcile on connect');
+      return;
+    }
+    _log('Strap alarm: reconciling the enabled alarm on connect');
+    unawaited(setStrapAlarm(wake, enabled: true));
+  }
+
+  // ============================================================================================
+  // Bond handshake (Android bonding stack, ported from the Kotlin WhoopBleClient)
+  // ============================================================================================
+
+  /// Make sure [device] is BONDED before we enable the WHOOP custom notify CCCDs.
+  ///
+  /// Bonding is an Android concept: `flutter_blue_plus` exposes `bondState` / `createBond()` only on
+  /// Android, while iOS/CoreBluetooth performs (just-works) pairing implicitly when the first encrypted
+  /// characteristic is touched — so off Android this is a no-op that proceeds straight to the bring-up.
+  ///
+  /// The Kotlin transport forces the WHOOP-4 just-works bond with a confirmed GET_BATTERY_LEVEL write
+  /// once notifications are on; `flutter_blue_plus` gives us an explicit `createBond()` that performs
+  /// the same OS pairing without the write trick, so we gate the custom-CCCD enable behind it. The
+  /// createBond timeout uses the escalating [BondWatchdogBackoff] window so a slow-but-healthy bond gets
+  /// progressively more time, and repeated failures feed [BondRefusalGiveUp] so we stop hammering a
+  /// strap that keeps refusing (surfacing the re-pair guide instead of an infinite loop).
+  ///
+  /// Returns true when the link is bonded (or bonding doesn't apply); false when the bond failed — the
+  /// caller drops the link, and a give-up will already have latched the auto-reconnect pause.
+  Future<bool> _ensureBonded(BluetoothDevice device) async {
+    if (!_blePlatform || !Platform.isAndroid) return true;
+
+    BluetoothBondState current;
+    try {
+      current = await device.bondState.first;
+    } catch (e) {
+      _log('bondState read failed: $e — proceeding without an explicit bond');
+      return true; // a bond-state read failure shouldn't hard-block the bring-up
+    }
+    if (current == BluetoothBondState.bonded) {
+      _log('bondState bonded (already paired)');
+      _onGenuineBond();
+      return true;
+    }
+
+    // Not bonded: force the OS pairing BEFORE enabling the encrypted custom notify CCCDs.
+    final windowMs = _bondWatchdog.currentWindowMs();
+    _log('bondState bonding — requesting createBond (window ${windowMs ~/ 1000}s)');
+    try {
+      await device.createBond(timeout: (windowMs / 1000).ceil());
+      _log('bondState bonded');
+      _onGenuineBond();
+      return true;
+    } catch (e) {
+      return _onBondFailed(device, e);
+    }
+  }
+
+  /// A genuine bond landed: mark the connection bonded (for the loop detector) and re-arm the whole
+  /// stack — clear the refusal + watchdog streaks and lift any latched pause (mirrors Kotlin
+  /// `clearPairingHint`). The bond-loop detector is deliberately NOT reset here: it must survive across
+  /// bond→drop→bond→drop cycles and is cleared only by a healthy session or a user teardown.
+  void _onGenuineBond() {
+    _didBond = true;
+    _bondedAtMs = DateTime.now().millisecondsSinceEpoch;
+    _bondWatchdog.reset();
+    _bondGiveUp.reset();
+    _autoReconnectPausedForBondLoop = false;
+    _bondLoopPausedAtMs = null;
+  }
+
+  /// createBond failed (refusal or handshake-never-landed). Feed BOTH give-up trackers: the refusal
+  /// counter (#747/#750) stops the hammering after N refusals, and the watchdog (#971) escalates the
+  /// window and independently gives up after a capped number of stuck handshakes. If EITHER gives up we
+  /// latch the auto-reconnect pause and surface the re-pair guide; otherwise we return false so the
+  /// caller drops the link and the backoff reconnect retries with a wider bond window. Always false.
+  bool _onBondFailed(BluetoothDevice device, Object error) {
+    final refusalGaveUp = _bondGiveUp.recordRefusal();
+    final watchdogGaveUp = _bondWatchdog.recordBounce();
+    _log('bond refused (attempt ${_bondGiveUp.refusals}): $error');
+    if (refusalGaveUp || watchdogGaveUp) {
+      _enterBondLoopPause(device.remoteId.str,
+          refusalGaveUp ? 'bond refused' : 'bond handshake never completed');
+    } else {
+      _log('bond not established; dropping link to retry '
+          '(bond attempt ${_bondWatchdog.consecutiveBounces})');
+    }
+    return false;
+  }
+
+  /// Latch the auto-reconnect pause + surface the re-pair guide once. Stamps [_bondLoopPausedAtMs] so a
+  /// paused strap the user later frees can be re-probed past [bondLoopSalvageFloorMs] (see
+  /// [shouldSalvageProbe]), writes the one-line PII-free epitaph, and sets [lastError] to the honest
+  /// paused hint so the device screen shows why NOOP stopped retrying.
+  void _enterBondLoopPause(String address, String cause) {
+    _autoReconnectPausedForBondLoop = true;
+    _bondLoopPausedAtMs = DateTime.now().millisecondsSinceEpoch;
+    final opaque = BondRefusalGiveUp.opaqueId(address);
+    _log(BondRefusalGiveUp.epitaphLine(_bondGiveUp.refusals, opaque));
+    _log('bond loop detected ($cause) — pausing auto-reconnect and surfacing the re-pair guide');
+    lastError = BondRefusalGiveUp.pausedHint();
   }
 
   /// WHOOP 4.0 bring-up: subscribe the three custom notify chars (CMD/EVENT/DATA). Kotlin fires a
@@ -1128,7 +1504,21 @@ class WhoopBleClient {
     } else {
       // Live path: publish HR immediately + buffer for a batched decode+insert (Kotlin Collector).
       _publishLiveHrFromRealtime(parsed);
+      _maybeSignalAlarmFired(frame, parsed);
       _bufferLiveFrame(frame);
+    }
+  }
+
+  /// A LIVE EVENT 57 (STRAP_DRIVEN_ALARM_EXECUTED) means the strap ran its own wake haptic — surface it
+  /// so the write-side can flip the alarm to "fired" (spec §5). Only on the live path: a historical
+  /// replay of the same event drains through the offload branch while syncing and is never surfaced
+  /// here (twin of the Kotlin `smartAlarmFiredForEvent` LIVE-only rule).
+  void _maybeSignalAlarmFired(Uint8List frame, ParsedFrame parsed) {
+    if (parsed.typeName != 'EVENT') return;
+    final evOff = _family == DeviceFamily.whoop5 ? 10 : 6;
+    if (_u8f(frame, evOff) == EventNumber.strapDrivenAlarmExecuted.rawValue) {
+      _log('Strap-driven alarm fired (event 57) — surfacing to the write-side');
+      if (!_alarmFiredController.isClosed) _alarmFiredController.add(null);
     }
   }
 
@@ -1142,9 +1532,28 @@ class WhoopBleClient {
           charging: chargingRaw == null ? null : chargingRaw != 0);
     }
 
+    final cmdOff = _family == DeviceFamily.whoop5 ? 10 : 6;
+    final respCmd = frame.length > cmdOff ? frame[cmdOff] & 0xFF : null;
+
+    // SET_ALARM_TIME ack: on 5/MG require result=SUCCESS; a WHOOP4 CR for cmd 66 is itself the ack.
+    // This flips the write-side queued→armed (spec §5).
+    if (respCmd == CommandNumber.setAlarmTime.rawValue) {
+      final result = parsed.parsed['result'];
+      final ok = _family == DeviceFamily.whoop4 ||
+          (result is String && result.startsWith('SUCCESS'));
+      if (ok) _emitAlarmArmed();
+    }
+
+    // GET_ALARM_TIME readback: decode defensively and surface it (telemetry only — never gates, §3).
+    if (respCmd == CommandNumber.getAlarmTime.rawValue) {
+      final epochMs = _decodeArmedAlarmEpochMs(frame);
+      _log('Strap alarm readback: '
+          '${epochMs == null ? 'none/implausible' : DateTime.fromMillisecondsSinceEpoch(epochMs).toIso8601String()}');
+      if (!_alarmReadbackController.isClosed) _alarmReadbackController.add(epochMs);
+    }
+
     // GET_DATA_RANGE: publish the strap's banked-record window to the Backfiller so the historical
     // ingest gate can reject records dated outside THIS strap's own [oldest, newest] (Kotlin #547).
-    final cmdOff = _family == DeviceFamily.whoop5 ? 10 : 6;
     if (frame.length > cmdOff &&
         (frame[cmdOff] & 0xFF) == CommandNumber.getDataRange.rawValue) {
       final newest = _dataRangeNewestUnix(frame);
@@ -1237,7 +1646,30 @@ class WhoopBleClient {
     _publishHr(null);
     if (wasConnected) _publishPaired(null);
 
+    // Feed the #617 bond-loop detector: a bond followed by a quick involuntary drop is the loop's
+    // signature. An intentional/user teardown is not a timeout, so it clears suspicion. A freshly
+    // tripped loop latches the auto-reconnect pause (checked just below). Inert off-device — _didBond
+    // never becomes true without a real Android bond.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final msSinceBond =
+        (_didBond && _bondedAtMs != null) ? nowMs - _bondedAtMs! : null;
+    if (_postBondLoop.connectionEnded(
+      wasBonded: _didBond,
+      msSinceBond: msSinceBond,
+      timedOut: !_intentionalDisconnect,
+    )) {
+      _enterBondLoopPause(_device?.remoteId.str ?? 'device', 'bond-then-quick-timeout loop');
+    }
+    _didBond = false; // the connection is gone; the next one re-proves the bond
+
     if (_intentionalDisconnect) {
+      _setState(BleConnectionState.idle);
+      return;
+    }
+    // A latched bond give-up / loop pause stops the auto-reconnect hammer: hold idle until the user
+    // taps Connect (which re-arms via [_resetBondStateForUserAction]) or a salvage probe fires.
+    if (_autoReconnectPausedForBondLoop) {
+      _log('auto-reconnect paused (bond give-up latched) — not scheduling a reconnect');
       _setState(BleConnectionState.idle);
       return;
     }
@@ -1303,23 +1735,20 @@ class WhoopBleClient {
       _log('send(${cmd.name}) ignored — no command characteristic');
       return;
     }
-    _seq = (_seq + 1) & 0xFF;
-    final Uint8List frame;
-    if (_family == DeviceFamily.whoop5) {
-      frame = Framing.puffinCommandFrame(
-        cmd: cmd.rawValue,
-        seq: _seq,
-        payload: payload == null ? null : Uint8List.fromList(payload),
-      );
-    } else {
-      frame = Framing.buildCommand(cmd,
-          payload: payload == null ? null : Uint8List.fromList(payload),
-          seq: _seq);
-    }
     // The WHOOP command characteristic supports write-with-response; use it for every command
     // (a dropped without-response write silently breaks SET_CLOCK / the offload ack). withResponse
     // is retained for call-site intent parity with the Kotlin send().
-    unawaited(_write(ch, frame));
+    unawaited(_write(ch, _frameFor(cmd, payload)));
+  }
+
+  /// Frame [cmd]+[payload] for the connected family (WHOOP4 [Framing.buildCommand] / 5MG puffin),
+  /// advancing the rolling command seq. Shared by [_send] and the strap-alarm writes.
+  Uint8List _frameFor(CommandNumber cmd, List<int>? payload) {
+    _seq = (_seq + 1) & 0xFF;
+    final pay = payload == null ? null : Uint8List.fromList(payload);
+    return _family == DeviceFamily.whoop5
+        ? Framing.puffinCommandFrame(cmd: cmd.rawValue, seq: _seq, payload: pay)
+        : Framing.buildCommand(cmd, payload: pay, seq: _seq);
   }
 
   Future<void> _write(BluetoothCharacteristic ch, Uint8List value,
@@ -1329,6 +1758,20 @@ class WhoopBleClient {
       await ch.write(value, withoutResponse: withoutResponse);
     } catch (e) {
       _log('write to ${ch.uuid} failed: $e');
+    }
+  }
+
+  /// Like [_write] but reports whether the GATT write actually completed. Used by [setStrapAlarm] so a
+  /// WHOOP4 completed write-with-response can be treated as the arm ACK. Off-device it returns false
+  /// (nothing was written), so no false "armed" is ever emitted in tests.
+  Future<bool> _writeChecked(BluetoothCharacteristic ch, Uint8List value) async {
+    if (!_blePlatform) return false;
+    try {
+      await ch.write(value);
+      return true;
+    } catch (e) {
+      _log('write to ${ch.uuid} failed: $e');
+      return false;
     }
   }
 
