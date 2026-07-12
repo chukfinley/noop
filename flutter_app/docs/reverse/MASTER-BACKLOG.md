@@ -4,6 +4,37 @@
 integration. It supersedes ad-hoc TODOs. Every work item references its recon spec under
 `docs/reverse/`, and every confirmed defect names the exact file + fix direction.
 
+---
+
+## 0. DECISIONS & DELIVERY STATUS (updated 2026-07-12)
+
+**Shipped & committed this cycle** (suite green, ~316 tests, `flutter analyze` clean):
+- Protocol decode + offload sync engine (DecoderOracle byte-golden), transport (scan/auto-detect/
+  reconnect), HR broadcast, permissions, live device screen + honest pills.
+- Bonding stack, kill-proof background sync (WorkManager + heartbeat guard), **smart alarm**
+  (Phase 1, byte-exact; WHOOP4 confirmed, WHOOP5 experimental), device-config + **haptics** (Phase 2:
+  locate buzz + broadcast-HR-on-strap).
+- Phase 0 — **all 7 confirmed correctness defects fixed** (migration crash, scan/connect wedges,
+  background double-owner, broadcaster leaks).
+- Phase 5 — **untapped data capture**: all decoded-but-dropped WHOOP5 v18 fields now persisted
+  (`rawFieldSample`, schema v4). Raw data is durable, append-only, immutable.
+- **Live-only data**: the app no longer loads the bundled historical capture — it derives everything
+  from live strap syncs (drift), recalibrating from scratch.
+
+**User decisions:**
+- **Phase 6 (Workouts) → BACKLOG.** Deferred, to be done someday. NOT implemented now.
+- **Phase 8 (OTA firmware update) → CANCELLED / STRUCK.** Brick risk = money risk; the user vetoed it.
+  Do not build it. `firmware-update-ota.md` stays only as RE reference, marked cancelled. Any future
+  build must be an explicit new decision, default-OFF, behind a heavy guard.
+- **GB-retention + raw→analytics live re-derivation** — remain deferred (§5, user's call).
+
+**Remaining, un-owned (need a future go):** Phase 3 analytics wins (evaluated, all regressed on our
+data — see below; only the resp estimator is a genuine bug worth a validated pass), Phase 4 bond
+hardening extras, Phase 7 broader command coverage + EVENT demux.
+
+**All BLE behaviour is compile+test verified but needs ON-DEVICE validation** (GATT can't be unit
+tested per CLAUDE.md). Use the in-app connection log + this doc's specs to debug on the real strap.
+
 **Verification gate (BINDING):** `flutter analyze` clean, then `flutter test`. Do NOT launch the
 app. Each BLE opcode/frame change ships with a byte-exact frame roundtrip test; each analytics
 change is gated on the printed report from `test/pipeline_real_data_test.dart`. See CLAUDE.md.

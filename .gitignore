@@ -95,3 +95,8 @@ __pycache__/
 # Local release artifacts (zips/ipas built for upload; never tracked)
 dist/
 err.txt
+
+# scratch / non-project artifacts
+_scratch/
+.playwright-mcp/
+session.txt
