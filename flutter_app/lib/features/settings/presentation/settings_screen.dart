@@ -1,6 +1,10 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
+import 'package:noop/core/data/portability/data_portability.dart';
 import 'package:noop/core/data/weather.dart';
 import 'package:noop/core/state/prefs.dart';
 import 'package:noop/core/state/providers.dart';
@@ -724,21 +728,114 @@ class _AiSettingsState extends ConsumerState<_AiSettings> {
   }
 }
 
-class _DataSettings extends StatelessWidget {
+class _DataSettings extends ConsumerWidget {
   const _DataSettings();
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return ScreenScaffold(title: 'Data', children: [
       ConnectedGroup([
         (r) => SettingsTile(
               radius: r,
-              icon: Icons.cloud_sync_rounded,
+              icon: Icons.file_download_rounded,
               iconColor: Palette.metricCyan,
-              title: 'Backup & sync',
-              onTap: () {},
+              title: 'Import data',
+              detail: 'Bring in a NOOP backup (.noopbak / .sqlite) from another '
+                  'phone or the Kotlin/iOS NOOP app',
+              onTap: () => _import(context, ref),
+            ),
+        (r) => SettingsTile(
+              radius: r,
+              icon: Icons.file_upload_rounded,
+              iconColor: Palette.accent,
+              title: 'Export data',
+              detail: 'Save all your data as a .noopbak backup you can move or '
+                  're-import',
+              onTap: () => _export(context, ref),
             ),
       ]),
+      Padding(
+        padding: const EdgeInsets.only(top: Metrics.space16),
+        child: Text(
+          'Everything stays on your device. Import is additive — it never '
+          'deletes what you already have, and re-importing the same backup '
+          'changes nothing.',
+          style: NoopType.footnote.copyWith(color: Palette.textTertiary),
+        ),
+      ),
     ]);
+  }
+
+  /// Pick a `.noopbak` / `.zip` / `.sqlite` and merge it into the live store. The
+  /// raw sensor rows land under our own tables and the pipeline re-derives every
+  /// score, so the imported history appears after a restart.
+  Future<void> _import(BuildContext context, WidgetRef ref) async {
+    final picked = await FilePicker.platform.pickFiles(withData: false);
+    final path = picked?.files.single.path;
+    if (path == null) return;
+    if (!context.mounted) return;
+    noopToast(context, 'Importing…');
+    try {
+      final summary =
+          await DataPortability(ref.read(databaseProvider)).importFile(path);
+      if (!context.mounted) return;
+      if (!summary.recognised) {
+        noopToast(context, "That file didn't contain any NOOP data.",
+            kind: ToastKind.warning);
+        return;
+      }
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Palette.fillRaised,
+          title: Text('Imported ${summary.totalRows} rows',
+              style: NoopType.title2.copyWith(color: Palette.textPrimary)),
+          content: Text(
+            summary.totalRows == 0
+                ? 'This backup was already in your data — nothing new to add.'
+                : 'Your history was merged in. Restart NOOP to see it analysed.',
+            style: NoopType.body.copyWith(color: Palette.textSecondary),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    } on DataImportException catch (e) {
+      if (!context.mounted) return;
+      noopToast(context, e.message, kind: ToastKind.warning);
+    } catch (e) {
+      if (!context.mounted) return;
+      noopToast(context, 'Import failed: $e', kind: ToastKind.warning);
+    }
+  }
+
+  /// Export the whole store to a `.noopbak` in a temp dir and hand it to the OS
+  /// share sheet so the user can save it anywhere (Files, Drive, another phone).
+  Future<void> _export(BuildContext context, WidgetRef ref) async {
+    if (!context.mounted) return;
+    noopToast(context, 'Preparing backup…');
+    try {
+      final dir = await getTemporaryDirectory();
+      final stamp = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .split('.')
+          .first;
+      final path = '${dir.path}/noop-backup-$stamp.noopbak';
+      await DataPortability(ref.read(databaseProvider)).exportToNoopbak(path);
+      if (!context.mounted) return;
+      await Share.shareXFiles(
+        [XFile(path, mimeType: 'application/zip')],
+        subject: 'NOOP backup',
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      noopToast(context, 'Export failed: $e', kind: ToastKind.warning);
+    }
   }
 }
 

@@ -28,6 +28,10 @@ dependencies:
   sensors_plus: ^6.1.0
   flutter_foreground_task: ^9.2.2
   workmanager: ^0.9.0+3
+  # Data portability: import a Kotlin/Apple NOOP backup + export our own `.noopbak`.
+  archive: ^4.0.2 # pure-Dart zip (read/write the .noopbak container)
+  file_picker: ^8.1.6 # pick a backup file to import (SAF on Android)
+  share_plus: ^10.1.4 # share/save the exported .noopbak out of the app
 
 dev_dependencies:
   flutter_test:
