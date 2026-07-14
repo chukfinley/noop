@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'package:noop/core/analytics/engine_registry.dart';
 import 'package:noop/core/data/portability/data_portability.dart';
 import 'package:noop/core/data/weather.dart';
 import 'package:noop/core/state/prefs.dart';
@@ -74,6 +75,9 @@ class SettingsScreen extends ConsumerWidget {
             Palette.metricPurple, const _AppearanceSettings()),
         ('Strap', 'Connection & sensors', Icons.watch_rounded,
             Palette.effortColor, const _StrapSettings()),
+        ('Analysis engine', 'Which algorithm scores your data',
+            Icons.science_rounded, Palette.metricCyan,
+            const _AnalysisSettings()),
         ('Health & wellness', 'Reminders & detection', Icons.favorite_rounded,
             Palette.chargeColor, const _WellnessSettings()),
       ],
@@ -500,6 +504,57 @@ Future<void> _editWallpaperUrl(
     // A custom image is only visible with the wallpaper on — enable it.
     ref.read(wallpaperProvider.notifier).state = true;
     await Prefs.instance.setWallpaper(true);
+  }
+}
+
+/// Analysis-engine picker. Every registered engine scores the SAME synced data
+/// side-by-side; choosing one just re-points the app at its already-computed
+/// scores — nothing is deleted, re-synced or recomputed. So the user can flip
+/// between our own model and OpenStrap and instantly compare the numbers.
+class _AnalysisSettings extends ConsumerWidget {
+  const _AnalysisSettings();
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final selected = ref.watch(selectedEngineProvider);
+    final byEngine = ref.watch(daysByEngineProvider);
+    return ScreenScaffold(title: 'Analysis engine', children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(
+            Metrics.space4, 0, Metrics.space4, Metrics.space12),
+        child: Text(
+          'Every engine analyses the exact same synced data. Switching just '
+          'changes which scores you see — your data is never deleted or '
+          're-synced.',
+          style: NoopType.footnote.copyWith(color: Palette.textTertiary),
+        ),
+      ),
+      ConnectedGroup([
+        for (final engine in engineRegistry)
+          (r) {
+            final isSelected = engine.id == selected;
+            final hasData = (byEngine[engine.id] ?? const []).isNotEmpty;
+            return SettingsTile(
+              radius: r,
+              icon: isSelected
+                  ? Icons.check_circle_rounded
+                  : Icons.circle_outlined,
+              iconColor:
+                  isSelected ? Palette.accent : Palette.textTertiary,
+              title: engine.displayName,
+              detail: engine.blurb,
+              trailing: hasData
+                  ? null
+                  : Text('no data yet',
+                      style: NoopType.caption
+                          .copyWith(color: Palette.textTertiary)),
+              onTap: () {
+                ref.read(selectedEngineProvider.notifier).state = engine.id;
+                Prefs.instance.setAnalysisEngine(engine.id);
+              },
+            );
+          },
+      ]),
+    ]);
   }
 }
 
