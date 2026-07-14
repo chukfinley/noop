@@ -104,7 +104,13 @@ class _BackgroundSyncLifecycleObserver extends WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
+      // Start the foreground service (keeps syncing + shows the notification while
+      // backgrounded) AND register the periodic killed-app WorkManager job. Doing
+      // both here — not only at launch — means a strap paired MID-SESSION gets
+      // full background sync the first time the app is backgrounded, without
+      // needing a relaunch. Both no-op when bg sync is off / nothing paired.
       unawaited(maybeStartBackgroundSync(_container));
+      unawaited(maybeRegisterBackgroundSyncWork(_container));
     }
   }
 }

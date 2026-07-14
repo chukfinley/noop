@@ -521,6 +521,10 @@ class DeviceSettingsScreen extends ConsumerWidget {
   static Future<void> _connect(BuildContext context, WidgetRef ref) async {
     final client = ref.read(whoopBleClientProvider);
     await ensureBlePermissions();
+    // Ask for notifications here in the foreground too, so background sync can
+    // actually show its status notification later (a request while backgrounding
+    // wouldn't surface a dialog).
+    await ensureNotificationPermission();
     if (!context.mounted) return;
     noopToast(context, 'Connecting…');
     await client.connectRemembered();
@@ -740,6 +744,7 @@ class DeviceSettingsScreen extends ConsumerWidget {
   static Future<void> _openScanPicker(
       BuildContext context, WidgetRef ref) async {
     await ensureBlePermissions();
+    await ensureNotificationPermission();
     if (!context.mounted) return;
     await showNoopSheet<void>(
       context,
