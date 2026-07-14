@@ -73,7 +73,7 @@ class LiveRepository implements Repository {
   }
 
   /// Regroup the drift stream rows into [RawDay]s (local calendar days) shaped
-  /// exactly like [RawCapture.days], so the pipeline consumes them identically:
+  /// the same shape the pipeline consumes:
   /// one [RawSample] per unix-second, merging the second's HR, its beat-to-beat
   /// RR intervals and its accel-magnitude.
   static Future<List<RawDay>> _buildDays(AppDatabase db) async {

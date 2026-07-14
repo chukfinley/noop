@@ -43,5 +43,7 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/data/real_raw.bin.gz
+    # NOTE: assets/data/real_raw.bin.gz is intentionally NOT bundled — the app is
+    # live-only and never reads it at runtime (17.5 MB of dead APK weight). It stays
+    # on disk and is loaded by the pipeline regression tests via File I/O.
     - assets/images/wallpaper.jpg

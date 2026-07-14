@@ -9,7 +9,6 @@ import 'package:noop/core/data/db/database.dart';
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/core/state/format.dart';
 import 'package:noop/core/data/repository.dart';
-import 'package:noop/core/data/real_repository.dart';
 import 'package:noop/features/sleep/presentation/sleep_screen.dart';
 import 'package:noop/core/analytics/engines.dart';
 import 'package:noop/core/analytics/baselines.dart';
@@ -106,31 +105,8 @@ void main() {
     expect(find.text(Fmt.shortDate(dayA.date)), findsNothing); // switched away
   });
 
-  testWidgets('Sleep screen keeps its header (back nav) on a no-sleep day', (tester) async {
-    // Real capture has some days with no staged sleep — the header must still
-    // render there so you can navigate back.
-    final repo = await RealRepository.load();
-    final container =
-        ProviderContainer(overrides: [repositoryProvider.overrideWithValue(repo)]);
-    addTearDown(container.dispose);
-    final days = container.read(daysProvider);
-    final idx = days.indexWhere((d) => d.sleep == null);
-    expect(idx, greaterThanOrEqualTo(0), reason: 'real data should contain a no-sleep day');
-
-    container.read(selectedDayIndexProvider.notifier).state = idx;
-    await tester.pumpWidget(UncontrolledProviderScope(
-      container: container,
-      child: const MaterialApp(home: SleepScreen()),
-    ));
-    await tester.pump(const Duration(seconds: 1));
-
-    final d = days[idx];
-    expect(find.text('No sleep recorded for this day.'), findsOneWidget);
-    // Header + day-nav (date) still present → the screen is navigable, not a
-    // dead end.
-    expect(find.text(Fmt.shortDate(d.date)), findsWidgets);
-    expect(find.text('Sleep'), findsWidgets);
-  });
+  // (The no-sleep-day Sleep-screen nav case is covered headlessly by
+  // live_repository_test's strap-sleep_state path — no bundled personal capture.)
 
   testWidgets('onboarding shows first, Get started enters the shell', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: NoopApp()));

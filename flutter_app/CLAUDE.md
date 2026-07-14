@@ -8,39 +8,36 @@ The user runs it himself and does his own hot reload. Our verification loop is t
 change code → flutter analyze → flutter test → read the analysis report → done
 ```
 
-`flutter test` is the gate. It proves the ported algorithm is correctly implemented on the REAL
-data BEFORE anything is built:
+`flutter test` is the gate. It proves the ported algorithm is correct BEFORE anything is built:
 - `test/analytics/engines_unit_test.dart` — pins each ported engine (HrvAnalyzer, StrainScorer,
   RecoveryScorer, Baselines) to hand-computed reference numbers. Change a formula/constant → this
   fails first.
-- `test/pipeline_real_data_test.dart` — loads the real bundled capture, runs the whole pipeline,
-  and **prints an analysis report** (days analysed, nights staged, Charge/Effort/RHR/HRV summary,
-  and resting-HR MAE vs Whoop's own ground truth) then asserts it stays sane. After any algorithm
-  change, run it and read that report to confirm what/how much was analysed and roughly the scores.
+- `test/live_repository_test.dart` — seeds synthetic strap rows into the drift store and asserts the
+  live pipeline scores them (incl. the strap-`sleep_state` sleep path).
+- `test/db/data_portability_test.dart` — round-trips a Kotlin/Apple `.noopbak`/`.sqlite` import and
+  our own export.
 
 If a change has a runtime surface the tests don't cover, add a test — never reach for the app.
 
 ---
 
-## Real data pipeline (the app shows REAL data, real dates)
-The app is backed by a genuine reverse-engineered Whoop 4.0/5.0 strap capture, not mock data.
+## Live-only data pipeline (no bundled personal data)
+The app is **live-only**: it starts EMPTY and fills from the user's OWN WHOOP strap over BLE. There
+is **no bundled capture and no personal data in the repo** — synthetic test data only. Never add a
+real capture, DB, screenshot or ground-truth of anyone's biometrics.
 
-- **Asset:** `assets/data/real_raw.bin.gz` — ~2.7M real per-second sensor rows (HR, beat-to-beat RR,
-  accel-magnitude, SpO2) over **88 days (2026-01-28 → 2026-05-26)**, packed little-endian
-  (see `lib/analytics/raw_samples.dart` for the wire format) and gzipped. Built from the whoop RE
-  repo's `whoop_unified.db`; nights kept full-resolution (contiguous beats for RMSSD/RHR), daytime
-  down-sampled.
-- **Ported algorithm (Kotlin → Dart):** the Kotlin analytics in `../android/.../analytics/` stay as
-  the reference and are **faithfully ported** to `lib/analytics/`:
-  `hrv_analyzer.dart` (RMSSD/SDNN/cleaning), `recovery_scorer.dart` (resting HR + recovery logistic),
-  `strain_scorer.dart` (Edwards TRIMP → Effort), `baselines.dart` (EWMA personal baselines),
-  `sleep_stager.dart` (simplified sleep window + stages — HR-driven, the strap accel is too noisy to
-  threshold absolutely), `engines.dart` (rest/stress/sleep-need).
-- **Orchestrator:** `lib/analytics/daily_pipeline.dart` runs the ported engines per local day
-  (sleep window → RHR/RMSSD/resp over the window → personal baselines → Charge/Effort/Rest/Stress),
-  exactly like the Kotlin nightly pipeline. `lib/data/real_repository.dart` loads the asset at
-  startup, runs the pipeline, and implements `Repository`; `main()` overrides `repositoryProvider`
-  with it (falls back to `MockRepository` only if the asset can't be read).
+- **Source:** the strap's synced per-second rows in the local drift store (`hrSample` / `rrInterval`
+  / `gravitySample` / `sleepStateSample` / …). `lib/core/data/live_repository.dart` regroups them
+  per local day into `RawDay`/`RawSample` (`lib/core/analytics/raw_samples.dart`) and scores them.
+- **Ported algorithm (Kotlin → Dart):** the Kotlin analytics in `../android/.../analytics/` are the
+  reference, faithfully ported to `lib/core/analytics/`: `hrv_analyzer.dart`, `recovery_scorer.dart`,
+  `strain_scorer.dart`, `baselines.dart`, `sleep_stager.dart` (strap `sleep_state` first, HR
+  heuristic fallback), `engines.dart`.
+- **Orchestrator:** `lib/core/analytics/daily_pipeline.dart` runs the ported engines per local day.
+  `main()` builds a `LiveRepository` from the DB (empty until the strap syncs) — never a bundled
+  asset. `MockRepository` provides synthetic data for widget tests only.
+- **Import/export:** `lib/core/data/portability/data_portability.dart` imports a Kotlin/Apple NOOP
+  backup (raw sensor tables map 1:1) and exports our own `.noopbak`; the pipeline re-derives scores.
 - **Real, trustworthy metrics:** Recovery/Charge, HRV (RMSSD), Resting HR, Sleep
   (duration/efficiency/stages/hypnogram/performance), Effort (day strain), Stress, intraday HR.
 - **"Coming soon" (no reliable source in the capture):** skin temp, respiratory rate (estimator too
