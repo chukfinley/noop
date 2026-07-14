@@ -69,6 +69,18 @@ android {
             }
         }
     }
+
+    // Legacy JNI packaging: store the native .so libs COMPRESSED in the APK
+    // (extractNativeLibs=true) instead of uncompressed+aligned. Flutter's default
+    // (false) makes the download APK carry ~21 MB of raw libs; compressing them
+    // roughly halves the download — the size IzzyOnDroid/F-Droid distribution
+    // cares about. Trade-off is a one-time extraction on install; acceptable for a
+    // side-loaded / F-Droid app.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 flutter {
