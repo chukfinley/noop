@@ -95,6 +95,7 @@ class Prefs {
   static const _kMetric = 'units_metric';
   static const _kAppearance = 'appearance_mode';
   static const _kChartStyle = 'chart_style';
+  static const _kAnalysisEngine = 'analysis_engine_id';
   static const _kToggles = 'settings_toggles';
   static const _kBackgroundSync = 'background_sync_enabled';
   static const _kLastSyncAt = 'last_sync_at_ms';
@@ -134,6 +135,10 @@ class Prefs {
   String? aiApiKey;
   String aiBaseUrl = 'https://api.openai.com/v1';
   String aiModel = 'gpt-4o-mini';
+
+  /// Which analysis engine's scores the app shows (id from `engineRegistry`).
+  /// Defaults to our own model; the user can switch to OpenStrap in settings.
+  String analysisEngineId = 'noop';
 
   /// User-selected weather location, overriding the coarse IP guess. Null when
   /// the user has not chosen one (automatic mode).
@@ -282,6 +287,8 @@ class Prefs {
       if (ap != null && ap.isNotEmpty) appearanceMode = ap;
       final cs = all[_kChartStyle];
       if (cs != null && cs.isNotEmpty) chartStyle = cs;
+      final ae = all[_kAnalysisEngine];
+      if (ae != null && ae.isNotEmpty) analysisEngineId = ae;
       toggles = _decodeBoolMap(all[_kToggles]);
       final bg = all[_kBackgroundSync];
       backgroundSyncEnabled = (bg == null || bg.isEmpty) ? null : bg == 'true';
@@ -441,6 +448,11 @@ class Prefs {
   Future<void> setChartStyle(String value) async {
     chartStyle = value;
     await _write(_kChartStyle, value);
+  }
+
+  Future<void> setAnalysisEngine(String id) async {
+    analysisEngineId = id;
+    await _write(_kAnalysisEngine, id);
   }
 
   /// Set one on/off settings toggle by [key].

@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-import 'package:noop/core/analytics/daily_pipeline.dart';
+import 'package:noop/core/analytics/engine_registry.dart';
 import 'package:noop/core/analytics/raw_samples.dart';
 import 'package:noop/core/data/db/database.dart' show AppDatabase;
 import 'package:noop/core/data/models.dart';
@@ -20,7 +20,7 @@ import 'package:noop/core/state/prefs.dart' show HrvWindow;
 /// new sync, build a fresh one and swap it into `repositoryProvider` (see
 /// `main()`'s debounced reload on the whoop stream tables).
 class LiveRepository implements Repository {
-  LiveRepository._(this.profile, this._days, this._vitals);
+  LiveRepository._(this.profile, this._daysByEngine, this._vitals);
 
   @override
   final UserProfile profile;
@@ -33,16 +33,22 @@ class LiveRepository implements Repository {
   @override
   final double strapBattery = 0.0;
 
-  final List<DayRecord> _days;
+  /// Every registered engine's scored days, keyed by engine id. All engines run
+  /// over the SAME raw sync — nothing is deleted or re-fetched to switch.
+  final Map<String, List<DayRecord>> _daysByEngine;
   final List<VitalReading> _vitals;
 
   @override
-  List<DayRecord> get days => _days;
+  Map<String, List<DayRecord>> get daysByEngine => _daysByEngine;
+
+  /// The default engine's scored days (the app-wide fallback).
+  @override
+  List<DayRecord> get days => _daysByEngine[defaultEngineId] ?? const [];
 
   /// The most recent scored day. Callers must guard on [days] being empty first
   /// (the cold-start live state has no days at all).
   @override
-  DayRecord get today => _days.last;
+  DayRecord get today => days.last;
 
   /// No activity source is decoded from the live stream yet → always empty
   /// (never fabricated). Workouts land when the activity decoder is wired.
@@ -56,20 +62,27 @@ class LiveRepository implements Repository {
   /// and the safe fallback when the DB can't be opened (real-or-nothing: we never
   /// fall back to mock/fake numbers on device).
   static LiveRepository empty({UserProfile profile = const UserProfile()}) =>
-      LiveRepository._(profile, const [], const []);
+      LiveRepository._(profile, const {}, const []);
 
   /// Query the synced stream tables, regroup per local day, and score every day
-  /// through [DailyPipeline]. Returns an empty repository when nothing is synced.
+  /// through EVERY registered [AnalysisEngine] (our own + OpenStrap + …). Each
+  /// engine's scores are kept side-by-side so the UI can switch between them
+  /// with no re-analysis. Returns an empty repository when nothing is synced.
   static Future<LiveRepository> load(
     AppDatabase db, {
     UserProfile profile = const UserProfile(),
     HrvWindow hrvWindow = HrvWindow.wholeNight,
   }) async {
     final days = await _buildDays(db);
-    if (days.isEmpty) return LiveRepository._(profile, const [], const []);
-    final scored = DailyPipeline(profile, hrvWindow: hrvWindow).run(days);
-    if (scored.isEmpty) return LiveRepository._(profile, const [], const []);
-    return LiveRepository._(profile, scored, _buildVitals(scored));
+    if (days.isEmpty) return LiveRepository._(profile, const {}, const []);
+    final byEngine = <String, List<DayRecord>>{};
+    for (final engine in engineRegistry) {
+      final scored = engine.analyze(days, profile, hrvWindow: hrvWindow);
+      if (scored.isNotEmpty) byEngine[engine.id] = scored;
+    }
+    if (byEngine.isEmpty) return LiveRepository._(profile, const {}, const []);
+    final primary = byEngine[defaultEngineId] ?? byEngine.values.first;
+    return LiveRepository._(profile, byEngine, _buildVitals(primary));
   }
 
   /// Regroup the drift stream rows into [RawDay]s (local calendar days) shaped

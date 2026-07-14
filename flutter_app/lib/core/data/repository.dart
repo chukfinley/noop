@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:noop/core/analytics/baselines.dart';
+import 'package:noop/core/analytics/engine_registry.dart';
 import 'package:noop/core/analytics/engines.dart';
 import 'package:noop/core/data/models.dart';
 
@@ -16,8 +17,14 @@ abstract class Repository {
   /// Strap battery, 0..1.
   double get strapBattery;
 
-  /// All day records, oldest → newest.
+  /// All day records, oldest → newest (the DEFAULT engine's scores).
   List<DayRecord> get days;
+
+  /// Every analysis engine's scored days, keyed by engine id — the same raw
+  /// data scored by each registered [AnalysisEngine]. The UI picks which one to
+  /// show via `selectedEngineProvider`. Defaults to just the default engine's
+  /// days; [LiveRepository] runs all registered engines.
+  Map<String, List<DayRecord>> get daysByEngine => {defaultEngineId: days};
 
   /// Convenience: the most recent day.
   DayRecord get today;
@@ -54,6 +61,8 @@ class MockRepository implements Repository {
 
   @override
   List<DayRecord> get days => _days;
+  @override
+  Map<String, List<DayRecord>> get daysByEngine => {defaultEngineId: _days};
   @override
   DayRecord get today => _days.last;
   @override

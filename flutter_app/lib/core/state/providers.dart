@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
+import 'package:noop/core/analytics/engine_registry.dart';
 import 'package:noop/core/data/db/database.dart' show AppDatabase;
 import 'package:noop/core/data/repository.dart';
 import 'package:noop/core/state/log_store.dart';
@@ -45,8 +46,23 @@ final profileProvider = Provider<UserProfile>((ref) {
   );
 });
 
-/// All days oldest → newest.
-final daysProvider = Provider<List<DayRecord>>((ref) => ref.watch(repositoryProvider).days);
+/// Every analysis engine's scored days, keyed by engine id (all run over the
+/// same raw sync). The switcher reads this to know which engines have data.
+final daysByEngineProvider = Provider<Map<String, List<DayRecord>>>(
+    (ref) => ref.watch(repositoryProvider).daysByEngine);
+
+/// The analysis engine the user is viewing (persisted). Switching it re-points
+/// [daysProvider] at that engine's already-computed scores — no re-analysis.
+final selectedEngineProvider =
+    StateProvider<String>((ref) => Prefs.instance.analysisEngineId);
+
+/// All days oldest → newest, for the SELECTED analysis engine. Falls back to the
+/// default engine (then empty) when the selected engine produced nothing.
+final daysProvider = Provider<List<DayRecord>>((ref) {
+  final byEngine = ref.watch(daysByEngineProvider);
+  final selected = ref.watch(selectedEngineProvider);
+  return byEngine[selected] ?? byEngine[defaultEngineId] ?? const [];
+});
 
 /// Index into [daysProvider]; defaults to the latest day. Clamps to 0 when the
 /// live day list is still empty (no strap data synced yet) so it never underflows.
