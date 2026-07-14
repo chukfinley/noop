@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:noop/core/ble/background/background_sync_scheduler.dart'
+    show cancelBackgroundSyncWork, registerBackgroundSyncWork;
 import 'package:noop/core/ble/background/background_sync_service.dart';
 import 'package:noop/core/ble/broadcast/hr_broadcast.dart';
 import 'package:noop/core/ble/protocol/device_family.dart';
@@ -477,13 +479,22 @@ class DeviceSettingsScreen extends ConsumerWidget {
 
   /// Flip the background-sync preference: update the provider (so the tile
   /// reflects it immediately), persist the explicit choice to [Prefs], and
-  /// start/stop the Android foreground service accordingly. The service is a
-  /// strict no-op off Android and in tests, so this stays inert there.
+  /// start/stop BOTH background-sync mechanisms so a runtime toggle is complete:
+  /// the foreground service (holds the link while backgrounded, and now dismisses
+  /// its own notification once a sync finishes) AND the periodic WorkManager job
+  /// (headless killed-app sync + the job that keeps syncing after the service has
+  /// auto-stopped). Both are strict no-ops off Android and in tests.
   static void _setBackgroundSync(WidgetRef ref, bool value) {
     ref.read(backgroundSyncEnabledProvider.notifier).state = value;
     unawaited(Prefs.instance.setBackgroundSyncEnabled(value));
     final service = ref.read(backgroundSyncServiceProvider);
-    unawaited(value ? service.start() : service.stop());
+    if (value) {
+      unawaited(service.start());
+      unawaited(registerBackgroundSyncWork());
+    } else {
+      unawaited(service.stop());
+      unawaited(cancelBackgroundSyncWork());
+    }
   }
 
   /// Buzz the connected strap so the user can find it on the wrist. Fires the confirmed

@@ -25,7 +25,7 @@
 ///    and even if they did, [isSupported] is false off Android, so nothing starts.
 library;
 
-import 'dart:async' show unawaited;
+import 'dart:async' show StreamSubscription, unawaited;
 import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
@@ -33,7 +33,8 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../state/prefs.dart';
-import '../transport/whoop_ble_client.dart' show BleConnectionState, WhoopBleClient;
+import '../transport/whoop_ble_client.dart'
+    show BleConnectionState, SyncProgress, WhoopBleClient;
 import '../transport/whoop_providers.dart' show readPairedStrap, whoopBleClientProvider;
 import 'background_sync_task_handler.dart';
 
@@ -74,6 +75,19 @@ class BackgroundSyncService {
   bool _initialized = false;
   bool _callbackAttached = false;
 
+  /// Watches the live offload so the service can DISMISS ITSELF (and its
+  /// notification) the moment a sync finishes, instead of hanging a permanent
+  /// "syncing" notification forever. Continued background sync after this is
+  /// carried by the periodic WorkManager job (registered whenever background
+  /// sync is enabled), so stopping the service here loses no data — the next
+  /// backgrounding restarts it (see the app-lifecycle observer in main()).
+  StreamSubscription<SyncProgress>? _syncSub;
+
+  /// Only auto-stop after we've actually SEEN an offload run this service
+  /// session — otherwise a replayed stale `complete` at subscribe time would
+  /// tear the service down before it ever synced.
+  bool _sawOffloading = false;
+
   /// Android-only. Off Android/web (desktop, iOS, tests) every method is a no-op.
   static bool get isSupported => !kIsWeb && Platform.isAndroid;
 
@@ -109,12 +123,44 @@ class BackgroundSyncService {
     } catch (e) {
       debugPrint('BackgroundSyncService.start failed: $e');
     }
+
+    _watchForCompletion();
+  }
+
+  /// Subscribe to the live offload so the service dismisses itself when the sync
+  /// finishes. Fires only on the transition INTO `complete` after a real
+  /// `offloading` run this session, so a stale replayed `complete` can't stop us
+  /// before syncing. Idempotent — re-subscribes cleanly on a restart.
+  void _watchForCompletion() {
+    final WhoopBleClient client;
+    try {
+      client = _ref.read(whoopBleClientProvider);
+    } catch (e) {
+      debugPrint('BackgroundSyncService: client unavailable to watch sync: $e');
+      return;
+    }
+    _sawOffloading = false;
+    unawaited(_syncSub?.cancel());
+    _syncSub = client.syncProgress.listen((p) {
+      if (p.phase == 'offloading') {
+        _sawOffloading = true;
+      } else if (p.phase == 'complete' && _sawOffloading) {
+        _sawOffloading = false;
+        // Sync done → let the notification go away. WorkManager keeps syncing
+        // periodically; the lifecycle observer restarts us on the next background.
+        _updateNotification('WHOOP synced', 'Up to date');
+        unawaited(stop());
+      }
+    });
   }
 
   /// Stop the foreground service and drop the main-isolate nudge listener.
   Future<void> stop() async {
     if (!isSupported) return;
     _detachCallback();
+    unawaited(_syncSub?.cancel());
+    _syncSub = null;
+    _sawOffloading = false;
     try {
       if (await FlutterForegroundTask.isRunningService) {
         await FlutterForegroundTask.stopService();

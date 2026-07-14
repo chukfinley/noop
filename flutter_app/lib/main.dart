@@ -80,10 +80,33 @@ Future<void> main() async {
   // this process is alive (the single-owner concurrency guard).
   unawaited(maybeRegisterBackgroundSyncWork(container));
 
+  // Re-arm the foreground service on every backgrounding: the service dismisses
+  // its own notification once each sync completes (so it never hangs a permanent
+  // "syncing" notification), which means a later backgrounding needs to start a
+  // fresh cycle. No-op when background sync is off / nothing paired / off Android.
+  WidgetsBinding.instance
+      .addObserver(_BackgroundSyncLifecycleObserver(container));
+
   runApp(UncontrolledProviderScope(
     container: container,
     child: const NoopApp(),
   ));
+}
+
+/// Restarts the background-sync foreground service each time the app is
+/// backgrounded, pairing with the service's dismiss-on-complete behaviour: every
+/// background cycle runs a sync whose notification shows while it works and clears
+/// when it is done. Continued sync between cycles is the periodic WorkManager job.
+class _BackgroundSyncLifecycleObserver extends WidgetsBindingObserver {
+  _BackgroundSyncLifecycleObserver(this._container);
+  final ProviderContainer _container;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      unawaited(maybeStartBackgroundSync(_container));
+    }
+  }
 }
 
 /// Debounced live re-derivation: on any change to the WHOOP HR/RR/gravity stream
