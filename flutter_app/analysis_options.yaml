@@ -9,6 +9,12 @@
 # packages, and plugins designed to encourage good coding practices.
 include: package:flutter_lints/flutter.yaml
 
+analyzer:
+  exclude:
+    # Vendored, unmodified third-party code (OpenStrap analytics, MIT). Kept
+    # verbatim so it tracks upstream — not linted to our style.
+    - lib/core/analytics/openstrap/vendor/**
+
 linter:
   # The lint rules applied to this project can be customized in the
   # section below to disable rules from the `package:flutter_lints/flutter.yaml`
