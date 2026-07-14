@@ -48,6 +48,10 @@
         android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"
         tools:targetApi="34" />
 
+    <!-- Let the user exempt NOOP from battery optimisation so the OS doesn't throttle/kill the
+         background offload mid-sync. Requested at runtime; sync still works (less reliably) if declined. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Android 13+ (API 33+): show the low-key persistent "WHOOP sync" foreground-service
          notification. Requested at runtime; the service still runs if the user declines. -->
     <uses-permission

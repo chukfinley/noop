@@ -490,6 +490,9 @@ class DeviceSettingsScreen extends ConsumerWidget {
     unawaited(Prefs.instance.setBackgroundSyncEnabled(value));
     final service = ref.read(backgroundSyncServiceProvider);
     if (value) {
+      // Enabling background sync is exactly when the battery-optimisation exemption
+      // matters — ask for it so the OS doesn't kill the offload while backgrounded.
+      unawaited(ensureBatteryOptimizationExemption());
       unawaited(service.start());
       unawaited(registerBackgroundSyncWork());
     } else {

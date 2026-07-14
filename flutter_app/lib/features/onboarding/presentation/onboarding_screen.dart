@@ -47,6 +47,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     try {
       await ensureBlePermissions();
       await ensureNotificationPermission();
+      await ensureBatteryOptimizationExemption();
     } catch (_) {}
     Prefs.instance.setOnboarded(true);
     if (!mounted) return;

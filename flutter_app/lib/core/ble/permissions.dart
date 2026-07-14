@@ -69,3 +69,14 @@ Future<bool> ensureNotificationPermission() async {
   final status = await Permission.notification.request();
   return status.isGranted;
 }
+
+/// Asks the user to exempt NOOP from Android battery optimisation, so the OS does
+/// not doze/throttle/kill the app mid-offload (the usual cause of a background sync
+/// that silently stalls). Android-only — iOS has no equivalent and this no-ops
+/// there. Shows the system "allow unrestricted background" dialog once; a decline
+/// never blocks the app, sync just runs less reliably in the background.
+Future<bool> ensureBatteryOptimizationExemption() async {
+  if (kIsWeb || !Platform.isAndroid) return true;
+  final status = await Permission.ignoreBatteryOptimizations.request();
+  return status.isGranted;
+}
