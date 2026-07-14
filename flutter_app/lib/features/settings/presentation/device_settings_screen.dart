@@ -145,10 +145,13 @@ class DeviceSettingsScreen extends ConsumerWidget {
                   style: NoopType.title2.copyWith(color: Palette.textPrimary)),
               const SizedBox(height: Metrics.space8),
               // Charging line ONLY when it's actually reported. No reading at all →
-              // "Not connected"; a stale (last-known) reading adds an honest "As of X
-              // ago" qualifier so the number is never mistaken for live.
+              // an HONEST label that reflects the LINK, not the absence of a battery
+              // byte: while the strap is connected/syncing the battery reading simply
+              // hasn't landed yet ("Reading battery…"), so we must not contradict the
+              // header by claiming "Not connected". Only a genuinely idle link says so.
+              // A stale (last-known) reading adds an "As of X ago" qualifier below.
               if (!hasBattery)
-                Text('Not connected',
+                Text(linked ? 'Reading battery…' : 'Not connected',
                     style:
                         NoopType.subhead.copyWith(color: Palette.textTertiary))
               else ...[
