@@ -29,7 +29,7 @@ real capture, DB, screenshot or ground-truth of anyone's biometrics.
 - **Source:** the strap's synced per-second rows in the local drift store (`hrSample` / `rrInterval`
   / `gravitySample` / `sleepStateSample` / …). `lib/core/data/live_repository.dart` regroups them
   per local day into `RawDay`/`RawSample` (`lib/core/analytics/raw_samples.dart`) and scores them.
-- **Ported algorithm (Kotlin → Dart):** the Kotlin analytics in `../android/.../analytics/` are the
+- **Ported algorithm (Kotlin → Dart):** the Kotlin analytics in `../archive/android/.../analytics/` are the
   reference, faithfully ported to `lib/core/analytics/`: `hrv_analyzer.dart`, `recovery_scorer.dart`,
   `strain_scorer.dart`, `baselines.dart`, `sleep_stager.dart` (strap `sleep_state` first, HR
   heuristic fallback), `engines.dart`.
