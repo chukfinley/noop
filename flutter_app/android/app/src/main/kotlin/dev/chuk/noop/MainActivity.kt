@@ -1,4 +1,4 @@
-package com.noop.noop
+package dev.chuk.noop
 
 import io.flutter.embedding.android.FlutterActivity
 
