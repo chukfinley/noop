@@ -87,6 +87,13 @@ enum EventNumber {
 /// are deliberately excluded so the in-app sender can never brick or wipe the device.
 enum CommandNumber {
   toggleRealtimeHr(3),
+  // ABORT_HISTORICAL_TRANSMITS (0x14) — tell the strap to stop any in-flight historical dump. This
+  // is NON-destructive (it only cancels the current offload stream; it never trims/wipes flash), and
+  // it is central to the official app's sync: the WHOOP app sends it (1) once on connect to clear a
+  // dump left running by a previously-crashed session, and (2) on any error / 5 s inactivity /
+  // cancel to unwedge the transfer. Mirrors Kotlin `WhoopProtocol.abortHistoricalTransmits` and
+  // official `com.whoop.straphistorysync.sync` (opcode verified in `vp0/e.smali`).
+  abortHistoricalTransmits(20),
   // REPORT_VERSION_INFO (7): WHOOP 4.0 firmware/version read. The strap answers with the bundled
   // component versions (`fw_harvard` a.b.c.d, `fw_boylston` a.b.c.d). A documented READ command,
   // separate from the firmware-LOAD opcodes. Mirrors Swift `WhoopCommand.reportVersionInfo`.

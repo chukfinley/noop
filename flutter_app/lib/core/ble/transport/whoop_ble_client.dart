@@ -248,6 +248,18 @@ class WhoopBleClient {
   /// on a settled link (Kotlin INITIAL_BACKFILL_DELAY_MS).
   static const Duration initialBackfillDelay = Duration(milliseconds: 1500);
 
+  /// Offload inactivity watchdog. The official app applies a 5 s inter-packet timeout to the
+  /// historical stream (`straphistorysync` `g13.k.o0(flow, 5s)`); if the strap goes silent between
+  /// METADATA/data packets mid-offload (a stall WITHOUT a BLE disconnect) the app sends
+  /// ABORT_HISTORICAL_TRANSMITS and ends the transfer. Without this, a silent stall wedges `syncing`
+  /// forever and suppresses the live path. Re-armed on every inbound offload frame.
+  static const Duration offloadInactivityTimeout = Duration(seconds: 5);
+
+  /// While connected, re-poll the strap battery on this cadence (proprietary GET_BATTERY_LEVEL 0x1A —
+  /// the strap does NOT use the standard 0x2A19 service, so this is the only live battery source on
+  /// WHOOP4). Mirrors the official app's periodic battery query.
+  static const Duration batteryPollInterval = Duration(seconds: 60);
+
   /// Spacing between the 15 SET_CONFIG R22 enable writes (Kotlin uses ~80ms).
   static const Duration r22FlagSpacing = Duration(milliseconds: 80);
 
@@ -379,6 +391,22 @@ class WhoopBleClient {
   @visibleForTesting
   set debugReconnectAttempt(int v) => _reconnectAttempt = v;
 
+  /// Whether an offload is in progress (drives the watchdog + live-path suppression).
+  @visibleForTesting
+  bool get debugSyncing => _syncing;
+
+  /// Place the client in the mid-offload state a running sync would reach, so the watchdog recovery
+  /// path is reachable radio-free (every GATT call is guarded behind `_blePlatform`, false in tests).
+  @visibleForTesting
+  void debugForceSyncing() {
+    _syncing = true;
+    _setState(BleConnectionState.syncing);
+  }
+
+  /// Fire the offload inactivity watchdog exactly as the real timer would.
+  @visibleForTesting
+  void debugFireOffloadWatchdog() => _onOffloadWatchdogFired();
+
   // ── bond hardening (Android bonding stack, ported from the Kotlin WhoopBleClient) ───────────
   /// Minimum time since the bond-loop pause tripped (or since the last probe) before another salvage
   /// probe may fire (#78 hole-4). 10 minutes: long enough that a still-held strap sees a handful of
@@ -453,6 +481,11 @@ class WhoopBleClient {
   Timer? _liveFlushTimer;
   Timer? _offloadKickTimer;
   Timer? _reconnectTimer;
+  /// Re-armed on every inbound offload frame; on elapse (still syncing) the offload is aborted so
+  /// `syncing` can never wedge on a silent strap. See [offloadInactivityTimeout].
+  Timer? _offloadWatchdog;
+  /// Periodic proprietary battery poll while connected. See [batteryPollInterval].
+  Timer? _batteryPollTimer;
 
   StreamSubscription<List<ScanResult>>? _scanSub;
   StreamSubscription<BluetoothConnectionState>? _connSub;
@@ -1442,6 +1475,12 @@ class WhoopBleClient {
   /// and resumes banking to flash) → GET_DATA_RANGE (refresh the stored range) → then, deferred by
   /// [initialBackfillDelay] so the first two round-trip on a settled link, kick the historical offload.
   void _runConnectHandshake() {
+    // ABORT_HISTORICAL_TRANSMITS FIRST — exactly as the official app's init sequence (Kotlin
+    // runInitSequence: ABORT → HELLO → BATTERY). A strap left mid-dump by a previously-crashed
+    // session keeps streaming stale history and never answers a fresh SEND_HISTORICAL_DATA cleanly;
+    // aborting first puts it back to a known-idle state so our own offload starts reliably.
+    _send(CommandNumber.abortHistoricalTransmits, payload: const []);
+
     // SET_CLOCK: WHOOP4 gets both firmware forms (8-byte + legacy 9-byte); 5/MG the single 8-byte form.
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     _send(CommandNumber.setClock, payload: _setClockPayload(now));
@@ -1451,12 +1490,40 @@ class WhoopBleClient {
       _send(CommandNumber.sendR10R11Realtime, payload: const [0]);
     }
     _send(CommandNumber.getDataRange, payload: const []);
-    _log('Connect handshake sent (set-clock/get-range)');
+    // Device-screen info the official app pulls on connect: firmware/serial (HELLO) + battery %/charging
+    // (GET_BATTERY_LEVEL 0x1A — proprietary, NOT the standard 0x2A19 service). Then keep battery fresh.
+    _queryDeviceInfo();
+    _startBatteryPollTimer();
+    _log('Connect handshake sent (abort/set-clock/get-range/hello/battery)');
 
     // Historical offload: the type-47 store is the PRIMARY metric source. Kick it once on connect,
     // deferred so SET_CLOCK/GET_DATA_RANGE round-trip first (Kotlin asyncAfter(1.5s) { requestSync }).
     _offloadKickTimer?.cancel();
     _offloadKickTimer = Timer(initialBackfillDelay, _beginBackfill);
+  }
+
+  /// One-shot device-state query: HELLO (firmware/serial + battery+charging on 5/MG) and the
+  /// proprietary battery level. Port of the official app's runInitSequence HELLO + GET_BATTERY_LEVEL.
+  void _queryDeviceInfo() {
+    // GET_HELLO_HARVARD(35) on WHOOP4, GET_HELLO(145) on 5/MG — the response carries firmware/serial,
+    // and on 5/MG the battery + charging bytes (parser `ni0/s`). Payload `[0x01]` mirrors Kotlin.
+    _send(
+      _family == DeviceFamily.whoop4
+          ? CommandNumber.getHelloHarvard
+          : CommandNumber.getHello,
+      payload: const [0x01],
+    );
+    // GET_BATTERY_LEVEL(26 / 0x1A) — empty payload, response is a raw-byte percentage (+ charging).
+    _send(CommandNumber.getBatteryLevel, payload: const []);
+  }
+
+  /// Keep the battery reading fresh while connected (the strap only reports battery on request; there
+  /// is no notify). Cancelled on disconnect/teardown. Mirrors the official app's periodic query.
+  void _startBatteryPollTimer() {
+    _batteryPollTimer?.cancel();
+    _batteryPollTimer = Timer.periodic(batteryPollInterval, (_) {
+      if (_connected) _send(CommandNumber.getBatteryLevel, payload: const []);
+    });
   }
 
   /// SET_CLOCK(10) 8-byte form: [seconds u32 LE][subseconds u32 LE]. Port of Kotlin setClockPayload.
@@ -1493,7 +1560,30 @@ class WhoopBleClient {
     // Payload MUST be [0x00], not empty: verified on-device that the strap serves type-47 only with
     // [0x00] (Kotlin sendHistoricalKick).
     _send(CommandNumber.sendHistoricalData, payload: const [0], withResponse: true);
+    // Arm the inactivity watchdog: if the strap never streams the first burst (or stalls mid-stream),
+    // this fires in [offloadInactivityTimeout] and aborts instead of wedging `syncing` forever.
+    _armOffloadWatchdog();
     _log('Backfill: session started — historical offload requested');
+  }
+
+  /// (Re)arm the offload inactivity watchdog. Called on begin and on every inbound offload frame, so
+  /// the timer only elapses after a genuine [offloadInactivityTimeout] of strap silence mid-offload.
+  void _armOffloadWatchdog() {
+    _offloadWatchdog?.cancel();
+    _offloadWatchdog = Timer(offloadInactivityTimeout, _onOffloadWatchdogFired);
+  }
+
+  /// The strap went silent mid-offload without a BLE disconnect. Do exactly what the official app does:
+  /// send ABORT_HISTORICAL_TRANSMITS, drop the uncommitted open chunk (never ack un-persisted data),
+  /// and end the session so the live path resumes. Already-acked chunks stay durably saved; the strap
+  /// resumes from its own trim pointer on the next connect.
+  void _onOffloadWatchdogFired() {
+    if (!_syncing) return;
+    _log('Offload watchdog: ${offloadInactivityTimeout.inSeconds}s strap silence mid-offload — '
+        'sending ABORT_HISTORICAL_TRANSMITS and ending the session (Kotlin timeout path)');
+    _send(CommandNumber.abortHistoricalTransmits, payload: const []);
+    _backfiller.timeoutFired();
+    _finishOffload();
   }
 
   /// A committed offload chunk: advance the "which day is syncing" cursor to the newest record ts in
@@ -1560,6 +1650,7 @@ class WhoopBleClient {
   }
 
   void _finishOffload() {
+    _offloadWatchdog?.cancel();
     if (!_syncing) return;
     _syncing = false;
     _emitSyncProgress('complete');
@@ -1656,6 +1747,7 @@ class WhoopBleClient {
       // The live type-40/43 flood is dropped here — extractHistoricalStreams ignores it and feeding
       // it only stalls the strap. Live HR still flows over the standard 0x2A37 profile. (Kotlin.)
       if (_isOffloadFrame(frame, _family)) {
+        _armOffloadWatchdog(); // strap made progress — reset the inactivity timer
         _ingestBackfill(frame);
       }
     } else {
@@ -1691,6 +1783,15 @@ class WhoopBleClient {
 
     final cmdOff = _family == DeviceFamily.whoop5 ? 10 : 6;
     final respCmd = frame.length > cmdOff ? frame[cmdOff] & 0xFF : null;
+
+    // GET_BATTERY_LEVEL (0x1A) response: the strap answers our proprietary poll with a raw-byte
+    // percentage (+ optional charging byte). This is the ONLY live battery source on WHOOP4 (the
+    // standard 0x2A19 char is a stub there). Decode + publish. (RE: response data at inner offset 5 =
+    // cmdOff+3; charging byte follows — matches official `ni0/k`/`vi0/c` + Kotlin battery heuristic.)
+    if (respCmd == CommandNumber.getBatteryLevel.rawValue) {
+      final b = decodeBatteryResponse(frame, cmdOff);
+      if (b != null) _publishBattery(b.$1, charging: b.$2);
+    }
 
     // SET_ALARM_TIME ack: on 5/MG require result=SUCCESS; a WHOOP4 CR for cmd 66 is itself the ack.
     // This flips the write-side queued→armed (spec §5).
@@ -1799,6 +1900,8 @@ class WhoopBleClient {
     _charSubs.clear();
     _liveFlushTimer?.cancel();
     _offloadKickTimer?.cancel();
+    _offloadWatchdog?.cancel();
+    _batteryPollTimer?.cancel();
     _reassembler.reset();
     _publishHr(null);
     if (wasConnected) _publishPaired(null);
@@ -1871,6 +1974,8 @@ class WhoopBleClient {
     }
     _connected = false;
     _syncing = false;
+    _offloadWatchdog?.cancel();
+    _batteryPollTimer?.cancel();
     _cmdChar = null;
     _liveBuffer.clear();
   }
@@ -1880,6 +1985,8 @@ class WhoopBleClient {
     _scanGiveUpTimer?.cancel();
     _liveFlushTimer?.cancel();
     _offloadKickTimer?.cancel();
+    _offloadWatchdog?.cancel();
+    _batteryPollTimer?.cancel();
     _reconnectTimer?.cancel();
   }
 
@@ -2026,6 +2133,38 @@ class WhoopBleClient {
   /// Whether a complete frame is a historical-offload frame (HISTORICAL_DATA/EVENT/METADATA/
   /// CONSOLE_LOGS, incl. the 5/MG puffin metadata type) vs the live REALTIME flood. The type byte
   /// sits at offset 4 (WHOOP4) or 8 (WHOOP5 puffin +4). The Backfiller re-validates every frame.
+  /// Decode a GET_BATTERY_LEVEL (0x1A) COMMAND_RESPONSE into `(fraction 0..1, charging?)`, or null if
+  /// no plausible percentage byte is present. [cmdOff] is the offset of the response command byte
+  /// (frame[cmdOff] == 0x1A); the response's data region begins just after it.
+  ///
+  /// The strap reports battery as a single raw byte = percent (RE `vi0/c`: `toString "BatteryLevel="+
+  /// byte`, low < 20%). The official parser slices the data at inner offset 5 (== [cmdOff]+3); we try
+  /// that exact byte first, then fall back to the proven Kotlin heuristic (first byte in 1..100) so an
+  /// off-by-a-firmware-revision layout still surfaces a value. A following 0/1 byte is the charge flag.
+  @visibleForTesting
+  static (double, bool?)? decodeBatteryResponse(Uint8List frame, int cmdOff) {
+    bool plausible(int v) => v >= 1 && v <= 100;
+    int at(int i) => (i >= 0 && i < frame.length) ? frame[i] & 0xFF : -1;
+
+    // Primary: the RE-precise data offset (inner+5 == cmdOff+3).
+    var pctIdx = cmdOff + 3;
+    if (!plausible(at(pctIdx))) {
+      // Fallback: first plausible byte anywhere in the data region after the command byte.
+      pctIdx = -1;
+      for (var i = cmdOff + 1; i < frame.length; i++) {
+        if (plausible(at(i))) {
+          pctIdx = i;
+          break;
+        }
+      }
+      if (pctIdx < 0) return null;
+    }
+    final pct = at(pctIdx);
+    final next = at(pctIdx + 1);
+    final bool? charging = (next == 0 || next == 1) ? next == 1 : null;
+    return (pct / 100.0, charging);
+  }
+
   static bool _isOffloadFrame(Uint8List frame, DeviceFamily family) {
     final off = family == DeviceFamily.whoop5 ? 8 : 4;
     if (frame.length <= off) return false;
