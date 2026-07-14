@@ -1579,8 +1579,9 @@ class WhoopBleClient {
   /// resumes from its own trim pointer on the next connect.
   void _onOffloadWatchdogFired() {
     if (!_syncing) return;
-    _log('Offload watchdog: ${offloadInactivityTimeout.inSeconds}s strap silence mid-offload — '
-        'sending ABORT_HISTORICAL_TRANSMITS and ending the session (Kotlin timeout path)');
+    _log('Offload watchdog: ${offloadInactivityTimeout.inSeconds}s strap silence — '
+        'STALLED at ${_fmtDataTs(_offloadCurrentTsUnix)} '
+        '(${_backfiller.sessionRowsPersisted} rows in); sending ABORT + restarting');
     _send(CommandNumber.abortHistoricalTransmits, payload: const []);
     _backfiller.timeoutFired();
     _finishOffload();
@@ -1594,8 +1595,25 @@ class WhoopBleClient {
         (_offloadCurrentTsUnix == null || newest > _offloadCurrentTsUnix!)) {
       _offloadCurrentTsUnix = newest;
     }
-    _log('Offload chunk committed — ${_backfiller.sessionRowsPersisted} records so far');
+    _log('Offload chunk — ${_backfiller.sessionRowsPersisted} rows · '
+        'at ${_fmtDataTs(_offloadCurrentTsUnix)} (data time)');
     _emitSyncProgress('offloading');
+  }
+
+  /// Human, local formatting of a DATA-record unix-seconds timestamp for the
+  /// connection log — so a line shows WHICH second of the wearer's own history the
+  /// sync had reached (the packet's time), not just when the log line was written.
+  /// "—" when unknown.
+  static String _fmtDataTs(int? unixSec) {
+    if (unixSec == null) return '—';
+    final t = DateTime.fromMillisecondsSinceEpoch(unixSec * 1000);
+    const mon = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    String p2(int n) => n.toString().padLeft(2, '0');
+    return '${p2(t.day)} ${mon[t.month - 1]} '
+        '${p2(t.hour)}:${p2(t.minute)}:${p2(t.second)}';
   }
 
   /// The newest wall-clock unix-seconds timestamp across every row list in a committed chunk, or null
@@ -1655,7 +1673,8 @@ class WhoopBleClient {
     _syncing = false;
     _emitSyncProgress('complete');
     _setState(_connected ? BleConnectionState.connected : BleConnectionState.idle);
-    _log('Backfill: offload complete (${_backfiller.sessionRowsPersisted} rows this session)');
+    _log('Backfill: offload complete — ${_backfiller.sessionRowsPersisted} rows this '
+        'session, up to ${_fmtDataTs(_offloadCurrentTsUnix)} (data time)');
   }
 
   // ============================================================================================
