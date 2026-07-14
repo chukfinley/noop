@@ -186,8 +186,14 @@ class DeviceSettingsScreen extends ConsumerWidget {
           ),
         ),
 
-        // ── Sync progress (only while an offload is running/just ran) ────────
-        if (sync != null && sync.phase != 'idle') _syncCard(sync),
+        // ── Sync progress (only while the link is actually up) ───────────────
+        // Gated on [linked]/[busy] so a lingering "Sync complete" card can't
+        // contradict a "Not connected" header once the strap drops the link
+        // between offloads (the sync stream keeps its last phase; the connection
+        // stream is the single source of truth for whether we're linked). This
+        // keeps every connection-status surface on this screen mutually consistent.
+        if (sync != null && sync.phase != 'idle' && (linked || busy))
+          _syncCard(sync),
 
         // ── Connection ──────────────────────────────────────────────────────
         // Automatic pairing: the primary action is a single Connect that calls
@@ -243,7 +249,7 @@ class DeviceSettingsScreen extends ConsumerWidget {
                 icon: Icons.cloud_sync_rounded,
                 iconColor: Palette.metricCyan,
                 title: 'Sync now',
-                detail: _syncDetail(sync, syncState),
+                detail: _syncDetail(sync, syncState, linked || busy),
                 trailing: _chevron,
                 onTap: () => _syncNow(context, ref),
               ),
@@ -542,8 +548,12 @@ class DeviceSettingsScreen extends ConsumerWidget {
   /// The "Sync now" tile subtitle. A live offload wins; otherwise the persisted
   /// [SyncState] drives a real "Last synced &lt;relative&gt;" (+ the last record count
   /// when known), or an honest "Never synced" before any offload has completed.
-  static String _syncDetail(SyncProgress? sync, SyncState syncState) {
-    if (sync != null && sync.phase != 'idle') {
+  static String _syncDetail(SyncProgress? sync, SyncState syncState, bool linkUp) {
+    // Only surface the LIVE offload line while the link is actually up; once the
+    // strap drops the link the sync stream keeps its last phase, so fall through
+    // to the persisted "Last synced …" instead of a stale "· complete" that would
+    // contradict the disconnected connection state.
+    if (linkUp && sync != null && sync.phase != 'idle') {
       return 'Synced ${sync.recordsPersisted} records · ${sync.phase}';
     }
     final at = syncState.lastSyncAt;
