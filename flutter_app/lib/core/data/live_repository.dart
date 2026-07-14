@@ -81,6 +81,7 @@ class LiveRepository implements Repository {
     if (hrRows.isEmpty) return const [];
     final rrRows = await db.select(db.whoopRrIntervals).get();
     final gravRows = await db.select(db.whoopGravitySamples).get();
+    final sleepStateRows = await db.select(db.whoopSleepStateSamples).get();
 
     // ts (unix seconds) → mutable per-second builder.
     final byTs = <int, _SampleBuilder>{};
@@ -91,6 +92,13 @@ class LiveRepository implements Repository {
     }
     for (final r in rrRows) {
       if (r.rrMs > 0) at(r.ts).rr.add(r.rrMs);
+    }
+    // The strap's OWN per-second sleep_state (#175) — ground truth. Carried
+    // verbatim (0 = awake, non-zero = a sleep stage) so the pipeline anchors the
+    // sleep window to what the band actually recorded instead of re-deriving it
+    // from HR. A second with a state but no HR still seeds a builder.
+    for (final r in sleepStateRows) {
+      at(r.ts).sleepState = r.state;
     }
     for (final r in gravRows) {
       // |accel| magnitude in g — ~1.0 at rest. The pipeline treats the deviation
@@ -139,11 +147,13 @@ class _SampleBuilder {
   final int ts;
   int hr = 0;
   double? mv;
+  int? sleepState;
   final List<int> rr = [];
 
   RawSample build() => RawSample(
         ts: ts,
         hr: hr,
+        sleepState: sleepState,
         // Raw SpO2 ADC is uncalibrated in the capture → "coming soon", never
         // fabricated. Left absent so the pipeline excludes it.
         spo2: 0,

@@ -21,6 +21,13 @@ class RawSample {
   final int rr1, rr2, rr3; // RR intervals, ms
   final double movement; // |accel| in g
 
+  /// The strap's OWN per-second sleep state (WHOOP `sleep_state`, #175), carried
+  /// verbatim: 0 = awake, non-zero = a sleep stage. `null` when the source has no
+  /// such channel (e.g. the bundled asset) — the pipeline then falls back to its
+  /// HR-derived sleep detection. This is the band's ground-truth sleep signal, so
+  /// when present it drives the sleep window instead of re-deriving it from HR.
+  final int? sleepState;
+
   const RawSample({
     required this.ts,
     required this.hr,
@@ -30,6 +37,7 @@ class RawSample {
     required this.rr2,
     required this.rr3,
     required this.movement,
+    this.sleepState,
   });
 
   /// The valid RR intervals (ms) carried by this row, in order.

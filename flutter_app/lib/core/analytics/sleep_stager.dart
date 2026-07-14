@@ -61,10 +61,12 @@ class SleepStager {
     required List<double?> epochHr,
     required List<double> epochMovement,
     double? dayHrMin,
+    List<bool>? epochAsleep,
   }) {
     final n = epochTs.length;
     if (n < _minWindowEpochs) return null;
     if (epochHr.length != n || epochMovement.length != n) return null;
+    if (epochAsleep != null && epochAsleep.length != n) return null;
 
     // Day's low HR: caller hint, else the min observed HR (fallback 50 bpm).
     double hrFloor = dayHrMin ?? double.infinity;
@@ -75,12 +77,17 @@ class SleepStager {
     }
     if (!hrFloor.isFinite) hrFloor = 50.0;
 
-    // ── 1. Find the longest low-HR run, tolerating short gaps.
-    // HR is the trustworthy sleep signal on this strap (the accel scalar is too
-    // noisy to threshold absolutely), so the window is HR-driven: an epoch is
-    // "sleepy" when it HAS a heart rate and that rate sits near the day's floor.
-    // Movement is used only for within-window awake/deep/REM staging below.
+    // ── 1. Find the longest sleep run, tolerating short gaps.
+    // GROUND-TRUTH FIRST: when the strap's own per-second sleep_state is available
+    // ([epochAsleep] non-null, #175), an epoch is "sleepy" exactly when the band
+    // says so — this matches WHOOP's official app and, crucially, reports NO sleep
+    // window on a day the wearer never slept (an awake-but-resting stretch in bed
+    // no longer gets mis-detected as a night). Only when the band gives us nothing
+    // (e.g. the bundled asset) do we fall back to the HR-driven heuristic: an epoch
+    // is sleepy when it HAS a heart rate that sits near the day's floor. Movement is
+    // used only for within-window awake/deep/REM staging below.
     final sleepy = List<bool>.generate(n, (i) {
+      if (epochAsleep != null) return epochAsleep[i];
       final h = epochHr[i];
       return h != null && h <= hrFloor + _hrSleepMargin;
     });

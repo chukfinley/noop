@@ -74,6 +74,10 @@ class DailyPipeline {
       epochHr: epochs.hr,
       epochMovement: epochs.mv,
       dayHrMin: dayHrMin,
+      // Strap-reported per-epoch asleep mask (#175) when this day carries the
+      // band's own sleep_state — its ground truth drives the window, so a day the
+      // wearer never slept yields no sleep at all. Null → HR-heuristic fallback.
+      epochAsleep: epochs.asleep,
     );
 
     // ── Nightly physiology from the sleep window ──────────────────────────────
@@ -316,7 +320,7 @@ class DailyPipeline {
   }
 
   _Epochs _buildEpochs(List<RawSample> s) {
-    if (s.isEmpty) return _Epochs([], [], []);
+    if (s.isEmpty) return _Epochs([], [], [], null);
     const e = SleepStager.epochSec;
     final start = s.first.ts - (s.first.ts % e);
     final end = s.last.ts;
@@ -325,6 +329,13 @@ class DailyPipeline {
     final cntHr = List<int>.filled(nBins, 0);
     final sumMv = List<double>.filled(nBins, 0);
     final cntMv = List<int>.filled(nBins, 0);
+    // Strap sleep_state accounting (#175): per bin, how many samples carried a
+    // state and how many of those were "asleep" (state != 0). Only used when the
+    // day has ANY stateful sample — else the strap channel is absent and the
+    // stager falls back to its HR heuristic.
+    final asleepCnt = List<int>.filled(nBins, 0);
+    final stateCnt = List<int>.filled(nBins, 0);
+    var anyState = false;
     for (final r in s) {
       final b = (r.ts - start) ~/ e;
       if (b < 0 || b >= nBins) continue;
@@ -336,6 +347,12 @@ class DailyPipeline {
       // deviation from that 1 g resting magnitude, so a still wrist ≈ 0.
       sumMv[b] += (r.movement - 1.0).abs();
       cntMv[b]++;
+      final st = r.sleepState;
+      if (st != null) {
+        anyState = true;
+        stateCnt[b]++;
+        if (st != 0) asleepCnt[b]++;
+      }
     }
     // Per-epoch raw motion = mean deviation from the 1 g resting magnitude.
     // The strap's accel scalar is noisy, so an absolute threshold is unreliable;
@@ -354,6 +371,10 @@ class DailyPipeline {
     final ts = <int>[];
     final hr = <double?>[];
     final mv = <double>[];
+    // Per-epoch strap asleep verdict: majority of the bin's stateful samples say
+    // asleep. A bin with no state sample (a gap) counts as awake, so gaps can't
+    // extend a night. Null overall when the day has no strap sleep_state at all.
+    final asleep = anyState ? List<bool>.filled(nBins, false) : null;
     for (var b = 0; b < nBins; b++) {
       ts.add(start + b * e);
       final hasHr = cntHr[b] > 0;
@@ -361,8 +382,11 @@ class DailyPipeline {
       final m = rawMotion[b];
       // No samples at all → treat as awake/active (5.0), never a sleep epoch.
       mv.add(m == null ? 5.0 : math.max(0.0, m - quiet));
+      if (asleep != null && stateCnt[b] > 0) {
+        asleep[b] = asleepCnt[b] * 2 >= stateCnt[b];
+      }
     }
-    return _Epochs(ts, hr, mv);
+    return _Epochs(ts, hr, mv, asleep);
   }
 
   double _windowSpo2(List<RawSample> s, int start, int end) {
@@ -404,5 +428,9 @@ class _Epochs {
   final List<int> ts;
   final List<double?> hr;
   final List<double> mv;
-  _Epochs(this.ts, this.hr, this.mv);
+
+  /// Per-epoch strap-reported asleep mask (#175), or null when this day carries
+  /// no strap sleep_state (the stager then uses its HR heuristic).
+  final List<bool>? asleep;
+  _Epochs(this.ts, this.hr, this.mv, this.asleep);
 }

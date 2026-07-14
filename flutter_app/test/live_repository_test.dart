@@ -53,6 +53,59 @@ Future<void> _seedOneDay(AppDatabase db, {String device = 'test-strap'}) async {
   });
 }
 
+/// Seed a night-shaped LOW-HR window (which the HR heuristic alone would happily
+/// stage as sleep) but tag every second with the strap's own sleep_state so the
+/// caller controls whether the band says "asleep". [strapAwake] = the whole window
+/// carries state 0 (awake) — ground truth the pipeline must honour over the HR
+/// signal. Returns the local date seeded.
+Future<DateTime> _seedNightWithStrapState(
+  AppDatabase db, {
+  required bool strapAwake,
+  String device = 'test-strap',
+  DateTime? date,
+}) async {
+  final d = date ?? DateTime(2026, 4, 1);
+  final base = d.millisecondsSinceEpoch ~/ 1000;
+  final hr = <WhoopHrSamplesCompanion>[];
+  final rr = <WhoopRrIntervalsCompanion>[];
+  final grav = <WhoopGravitySamplesCompanion>[];
+  final sleep = <WhoopSleepStateSamplesCompanion>[];
+
+  // 00:30 → 07:30, low still-wrist HR — indistinguishable from sleep to the HR
+  // heuristic. state: 0 (awake) when strapAwake, else 2 (a sleep stage).
+  const step = 30;
+  final state = strapAwake ? 0 : 2;
+  for (var t = base + 1800; t < base + 7 * 3600 + 1800; t += step) {
+    final k = (t - base) ~/ step;
+    final bpm = (50 + 3 * math.sin(k / 2.0)).round();
+    hr.add(WhoopHrSamplesCompanion.insert(deviceId: device, ts: t, bpm: bpm));
+    rr.add(WhoopRrIntervalsCompanion.insert(
+        deviceId: device, ts: t, rrMs: (60000 / bpm).round()));
+    grav.add(WhoopGravitySamplesCompanion.insert(
+        deviceId: device, ts: t, x: 0.0, y: 0.0, z: 1.0));
+    sleep.add(WhoopSleepStateSamplesCompanion.insert(
+        deviceId: device, ts: t, state: state));
+  }
+  // Daytime tail — clearly awake (state 0), higher HR, some motion.
+  for (var t = base + 9 * 3600; t < base + 22 * 3600; t += 300) {
+    final h = (t - base) / 3600.0;
+    hr.add(WhoopHrSamplesCompanion.insert(
+        deviceId: device, ts: t, bpm: (78 + 8 * math.sin(h)).round()));
+    grav.add(WhoopGravitySamplesCompanion.insert(
+        deviceId: device, ts: t, x: 0.3, y: 0.1, z: 1.0));
+    sleep.add(WhoopSleepStateSamplesCompanion.insert(
+        deviceId: device, ts: t, state: 0));
+  }
+
+  await db.batch((b) {
+    b.insertAll(db.whoopHrSamples, hr);
+    b.insertAll(db.whoopRrIntervals, rr);
+    b.insertAll(db.whoopGravitySamples, grav);
+    b.insertAll(db.whoopSleepStateSamples, sleep);
+  });
+  return d;
+}
+
 void main() {
   GoogleFonts.config.allowRuntimeFetching = false;
 
@@ -99,6 +152,38 @@ void main() {
     expect(d.rhr, greaterThan(0));
     expect(d.hrv, greaterThan(0));
     expect(repo.vitals, isNotEmpty);
+  });
+
+  test('strap sleep_state OVERRIDES the HR heuristic — an all-awake day with '
+      'sleep-like HR reports NO sleep (#175 ground truth)', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    // A full night of low, still HR — the HR-only stager would call this sleep —
+    // but the strap says awake (state 0) the whole time.
+    await _seedNightWithStrapState(db, strapAwake: true);
+
+    final repo = await LiveRepository.load(db);
+    expect(repo.days.length, 1);
+    // The band never slept → NO fabricated sleep window (the exact bug: the app
+    // used to claim a night the wearer never had).
+    expect(repo.days.single.sleep, isNull,
+        reason: 'strap sleep_state=0 must veto the HR-derived sleep window');
+  });
+
+  test('strap sleep_state drives a real sleep window when the band DID sleep',
+      () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    // Same HR shape, but the strap marks the window as a sleep stage (state 2).
+    await _seedNightWithStrapState(db, strapAwake: false);
+
+    final repo = await LiveRepository.load(db);
+    final d = repo.days.single;
+    expect(d.sleep, isNotNull, reason: 'strap-reported sleep must stage');
+    // The window came from the strap mask (~7h seeded), not a fluke.
+    expect(d.sleep!.asleep.inHours, greaterThanOrEqualTo(5));
+    expect(d.hrv, greaterThan(0));
+    expect(d.rhr, greaterThan(0));
   });
 
   testWidgets('app boots on an EMPTY live repo without crashing (Today shows '
