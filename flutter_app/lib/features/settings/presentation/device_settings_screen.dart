@@ -8,6 +8,7 @@ import 'package:noop/core/ble/background/background_sync_scheduler.dart'
     show cancelBackgroundSyncWork, registerBackgroundSyncWork;
 import 'package:noop/core/ble/background/background_sync_service.dart';
 import 'package:noop/core/ble/broadcast/hr_broadcast.dart';
+import 'package:noop/core/ble/permissions.dart';
 import 'package:noop/core/ble/protocol/device_family.dart';
 import 'package:noop/core/ble/transport/whoop_ble_client.dart'
     show
@@ -519,6 +520,8 @@ class DeviceSettingsScreen extends ConsumerWidget {
   /// transport's own error honestly (e.g. no BLE off-device).
   static Future<void> _connect(BuildContext context, WidgetRef ref) async {
     final client = ref.read(whoopBleClientProvider);
+    await ensureBlePermissions();
+    if (!context.mounted) return;
     noopToast(context, 'Connecting…');
     await client.connectRemembered();
     if (!context.mounted) return;
@@ -736,6 +739,8 @@ class DeviceSettingsScreen extends ConsumerWidget {
   /// choice. Used for first pairing / choosing among multiple straps.
   static Future<void> _openScanPicker(
       BuildContext context, WidgetRef ref) async {
+    await ensureBlePermissions();
+    if (!context.mounted) return;
     await showNoopSheet<void>(
       context,
       title: 'Scan for straps',

@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 
+import 'package:noop/core/ble/permissions.dart';
 import 'package:noop/core/theme/metrics.dart';
 import 'package:noop/core/theme/palette.dart';
+import 'package:noop/features/settings/presentation/device_settings_screen.dart';
+import 'package:noop/shared/widgets/behavior.dart';
 import 'package:noop/shared/widgets/cards.dart';
+import 'package:noop/shared/widgets/common.dart';
 
 /// Placeholders for metrics that have no real capture source yet. These stamp a
 /// clear, on-brand "Coming soon" treatment in place of fabricated numbers, so an
@@ -237,6 +241,20 @@ class ConnectStrapView extends StatelessWidget {
                   textAlign: TextAlign.center,
                   style: NoopType.body
                       .copyWith(color: Palette.textTertiary, height: 1.4)),
+              const SizedBox(height: Metrics.space24),
+              // The empty state is now ACTIONABLE: this requests BLE permission
+              // (the app never asked before) and opens the device screen to scan
+              // and pair — so a first-run user has an obvious way to connect.
+              NoopButton(
+                'Connect WHOOP',
+                icon: Icons.bluetooth_rounded,
+                onPressed: () async {
+                  await ensureBlePermissions();
+                  if (!context.mounted) return;
+                  await Navigator.of(context)
+                      .push(noopRoute(const DeviceSettingsScreen()));
+                },
+              ),
             ],
           ),
         ),

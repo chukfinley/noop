@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:noop/core/ble/permissions.dart';
 import 'package:noop/core/state/prefs.dart';
 import 'package:noop/core/state/providers.dart';
 import 'package:noop/shared/widgets/backgrounds.dart';
@@ -34,8 +35,21 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     super.dispose();
   }
 
-  void _complete() {
+  bool _finishing = false;
+
+  Future<void> _complete() async {
+    if (_finishing) return;
+    setState(() => _finishing = true);
+    // Ask for the grants the app actually needs, right here in onboarding: BLE
+    // (scan + connect) so the strap can be found, and notifications so background
+    // sync can show its status. Both no-op off mobile and never block finishing —
+    // a denied grant just means the user re-grants later from Settings.
+    try {
+      await ensureBlePermissions();
+      await ensureNotificationPermission();
+    } catch (_) {}
     Prefs.instance.setOnboarded(true);
+    if (!mounted) return;
     ref.read(onboardedProvider.notifier).state = true;
   }
 

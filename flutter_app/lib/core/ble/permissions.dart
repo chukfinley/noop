@@ -59,3 +59,13 @@ Future<bool> ensureBlePermissions() async {
   final connectOk = statuses[Permission.bluetoothConnect]?.isGranted ?? false;
   return scanOk && connectOk;
 }
+
+/// Requests the notification permission (Android 13+ `POST_NOTIFICATIONS`) so the
+/// background-sync foreground service can show its status notification. iOS asks
+/// its own way; older Android grants implicitly. No-ops off mobile. Returns
+/// whether notifications ended up allowed — never blocks the app either way.
+Future<bool> ensureNotificationPermission() async {
+  if (!_blePlatform) return true;
+  final status = await Permission.notification.request();
+  return status.isGranted;
+}
