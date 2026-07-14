@@ -32,6 +32,7 @@ dependencies:
   archive: ^4.0.2 # pure-Dart zip (read/write the .noopbak container)
   file_picker: ^8.1.6 # pick a backup file to import (SAF on Android)
   share_plus: ^10.1.4 # share/save the exported .noopbak out of the app
+  flutter_svg: ^2.0.10+1 # render the bundled NOOP vector logos in-app
 
 dev_dependencies:
   flutter_test:
@@ -39,6 +40,18 @@ dev_dependencies:
   flutter_lints: ^5.0.0
   drift_dev: ^2.28.0
   build_runner: ^2.4.15
+  flutter_launcher_icons: ^0.14.1 # generate the app launcher icon from the NOOP logo
+
+# App launcher icon — the blue NOOP mark (matches the app's blue accent). Run with
+# `dart run flutter_launcher_icons` after changing the source PNG.
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/noop_icon.png"
+  min_sdk_android: 21
+  remove_alpha_ios: true
+  adaptive_icon_background: "#0B1622"
+  adaptive_icon_foreground: "assets/icon/noop_icon.png"
 
 flutter:
   uses-material-design: true
@@ -47,3 +60,4 @@ flutter:
     # live-only and never reads it at runtime (17.5 MB of dead APK weight). It stays
     # on disk and is loaded by the pipeline regression tests via File I/O.
     - assets/images/wallpaper.jpg
+    - assets/logos/
