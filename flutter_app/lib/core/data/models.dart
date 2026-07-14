@@ -149,6 +149,49 @@ class DayRecord {
     this.workouts = const [],
     this.hr = const [],
   });
+
+  /// Copy with overrides — used by alternative [AnalysisEngine]s to re-score a
+  /// subset of fields (e.g. HRV / respiratory rate / charge) while keeping the
+  /// shared scaffolding (sleep, effort, HR thread) from a base computation.
+  DayRecord copyWith({
+    double? charge,
+    double? effort,
+    double? rest,
+    double? stress,
+    double? hrv,
+    double? rhr,
+    double? respiratoryRate,
+    double? skinTempDelta,
+    double? spo2,
+    int? steps,
+    int? calories,
+    int? fitnessAge,
+    int? vitality,
+    double? hydration,
+    SleepRecord? sleep,
+    List<Workout>? workouts,
+    List<HrSample>? hr,
+  }) =>
+      DayRecord(
+        date: date,
+        charge: charge ?? this.charge,
+        effort: effort ?? this.effort,
+        rest: rest ?? this.rest,
+        stress: stress ?? this.stress,
+        hrv: hrv ?? this.hrv,
+        rhr: rhr ?? this.rhr,
+        respiratoryRate: respiratoryRate ?? this.respiratoryRate,
+        skinTempDelta: skinTempDelta ?? this.skinTempDelta,
+        spo2: spo2 ?? this.spo2,
+        steps: steps ?? this.steps,
+        calories: calories ?? this.calories,
+        fitnessAge: fitnessAge ?? this.fitnessAge,
+        vitality: vitality ?? this.vitality,
+        hydration: hydration ?? this.hydration,
+        sleep: sleep ?? this.sleep,
+        workouts: workouts ?? this.workouts,
+        hr: hr ?? this.hr,
+      );
 }
 
 /// User profile — drives HR-max, sleep-need, units.
