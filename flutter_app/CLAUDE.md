@@ -48,6 +48,24 @@ real capture, DB, screenshot or ground-truth of anyone's biometrics.
   the whoop RE repo DB. If the ported algorithm changes, no re-pack is needed — the app re-derives
   every score from the raw asset at launch.
 
+## Pluggable analysis engines (multi-algorithm)
+The scoring layer is a **registry of engines** — several algorithms score the SAME raw stream
+side-by-side; the user switches which one the UI shows (Settings → Analysis engine), and nothing is
+deleted, re-synced or recomputed on switch.
+- `lib/core/analytics/engine.dart` — the `AnalysisEngine` interface (`analyze(List<RawDay>) → List<DayRecord>`, pure).
+- `engine_registry.dart` — the ordered list; entry 0 is the default. `NoopEngine` = our ported model
+  (`DailyPipeline`); `OpenStrapEngine` = the vendored OpenStrap methods (`openstrap/vendor/`, MIT):
+  Lipponen-Tarvainen RR-cleaned nocturnal RMSSD, RSA Lomb-Scargle respiratory rate, Plews lnRMSSD
+  Charge — computed over the sleep window our pipeline detects; sleep/strain/RHR stay shared.
+- `LiveRepository` runs EVERY engine per load into `daysByEngine`; `daysProvider` returns the
+  `selectedEngineProvider` engine's days (persisted via `Prefs.analysisEngineId`). Screens are
+  unchanged — still read `daysProvider`/`selectedDayProvider`.
+- Adding an engine: implement `AnalysisEngine`, add it to `engineRegistry`, done. Never rename an
+  engine `id` (a stored preference points at it). Vendored third-party engine code goes under
+  `openstrap/vendor/`-style dirs with its LICENSE + a MIT-credit header, analyzer-excluded.
+- Note: respiratory rate is "coming soon" under **NoopEngine** but IS produced by **OpenStrapEngine** —
+  the honesty rules below are per-engine (never fabricate a number the *selected* engine can't source).
+
 ---
 
 # Design guidelines (BINDING — follow, do not deviate)
