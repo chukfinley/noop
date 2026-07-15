@@ -103,6 +103,26 @@ void main() {
     }
   });
 
+  test('recovery shows a calibrating N/4 state until the HRV baseline is ready', () {
+    // Six consecutive full nights → the HRV baseline needs 4 valid nights before
+    // recovery is a real score; the earlier days must flag "calibrating N/4"
+    // instead of a fabricated number.
+    final days = const NoopEngine().analyze(_week(), profile);
+    final withNight = days.where((d) => d.sleep != null).toList();
+    expect(withNight.length, greaterThanOrEqualTo(5),
+        reason: 'each synthetic day has a scoreable night');
+    // First four scoreable nights are still calibrating; the count climbs 1→4.
+    for (var i = 0; i < 4; i++) {
+      expect(withNight[i].chargeCalibrating, isTrue,
+          reason: 'night $i should still be calibrating');
+      expect(withNight[i].chargeCalibrationNights, i + 1);
+    }
+    // Once four valid nights are banked, recovery becomes a real score.
+    expect(withNight[4].chargeCalibrating, isFalse);
+    expect(withNight[4].chargeCalibrationNights, isNull);
+    expect(withNight[4].charge, inInclusiveRange(0, 100));
+  });
+
   test('OpenStrap HRV is finite/positive and its charge diverges once warm', () {
     final days = _week();
     final noop = const NoopEngine().analyze(days, profile);

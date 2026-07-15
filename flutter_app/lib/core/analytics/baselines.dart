@@ -3,6 +3,11 @@ import 'dart:math' as math;
 /// Personal-baseline calibration status. Mirrors BaselineState.status.
 enum BaselineStatus { calibrating, provisional, trusted, stale }
 
+/// Valid nights a baseline needs before it is `usable` (leaves `calibrating`).
+/// The recovery model is HRV-baseline-dominant, so until the HRV baseline clears
+/// this the app reports a "calibrating N/needed nights" state instead of a score.
+const int baselineProvisionalMinNights = 4;
+
 /// A per-metric rolling baseline: an EWMA centre + EWMA absolute-deviation spread.
 /// Faithful port of `Baselines` (winsorized EWMA path).
 class BaselineState {
@@ -86,7 +91,7 @@ class Baselines {
     s.nValid++;
     s.nightsSinceUpdate = 0;
 
-    if (s.nValid < 4) {
+    if (s.nValid < baselineProvisionalMinNights) {
       s.status = BaselineStatus.calibrating;
     } else if (s.nValid < 14) {
       s.status = BaselineStatus.provisional;

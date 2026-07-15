@@ -43,6 +43,9 @@ BASE_CONFIGS = {  # metric -> (minVal, maxVal, floorSpread)
 }
 CENTER_HALFLIFE, SPREAD_HALFLIFE = 14.0, 21.0
 EARLY_ADAPT_NIGHTS, YOUNG_CENTER_HALFLIFE = 8, 3.0
+# Valid HRV nights the baseline needs before recovery is a real score. Below this
+# the app shows a "calibrating N/needed nights" state instead of a number.
+BASELINE_MIN_NIGHTS = 4
 
 
 def _lambda(halflife: float) -> float:
@@ -173,7 +176,7 @@ def baseline_update(s: Baseline, metric: str, value):
     s.spread = max(floor_spread, lam_s * abs(value - s.baseline) + (1 - lam_s) * s.spread)
     s.n_valid += 1
     s.nights_since = 0
-    if s.n_valid < 4:
+    if s.n_valid < BASELINE_MIN_NIGHTS:
         s.status = CALIBRATING
     elif s.n_valid < 14:
         s.status = PROVISIONAL
@@ -295,7 +298,7 @@ class DayResult:
     strain: float
     hrv_status: str
     recovery_raw: float | None
-    recovery_shown: float
+    calibration_nights: int | None   # None → real score; else N/BASELINE_MIN_NIGHTS
 
 
 @dataclass
@@ -396,7 +399,10 @@ def run_pipeline(days, age=30):
             rec_raw = recovery(hrv, float(rhr), hrv_base,
                                rhr_base if rhr_base.usable else None,
                                sleep_perf, hrv_usable)
-        rec_shown = rec_raw if rec_raw is not None else RECOVERY_POPULATION_MEAN
+        # None → real score; else nights collected so far (incl. tonight), so the
+        # UI shows "calibrating N/BASELINE_MIN_NIGHTS" instead of a number.
+        cal_nights = None if rec_raw is not None else min(
+            BASELINE_MIN_NIGHTS, hrv_base.n_valid + (1 if hrv is not None else 0))
 
         status_before = hrv_base.status
         if hrv is not None:
@@ -406,7 +412,7 @@ def run_pipeline(days, age=30):
 
         strain = edwards_strain(ts_hr, bpm, tanaka_hrmax(age))
         out.append(DayResult(date, len(bpm), sleep_min, eff, hrv, rhr,
-                             strain, status_before, rec_raw, rec_shown))
+                             strain, status_before, rec_raw, cal_nights))
     return out
 
 
@@ -417,13 +423,18 @@ def print_report(results):
     for r in results:
         hrv = f"{r.hrv:.1f}" if r.hrv is not None else "—"
         rhr = str(r.rhr) if r.rhr is not None else "—"
-        rec = f"{r.recovery_shown:.0f}"
-        flag = "" if r.recovery_raw is not None else "  ←58 (baseline calibrating)"
+        if r.recovery_raw is not None:
+            rec = f"{r.recovery_raw:.0f}"
+            flag = ""
+        else:
+            rec = f"{r.calibration_nights}/{BASELINE_MIN_NIGHTS}"
+            flag = "  (calibrating — shows this, not a number)"
         print(f"{r.date:12} {r.n_hr:>7} {r.sleep_min:>5}m {r.efficiency*100:>4.0f}% "
               f"{hrv:>6} {rhr:>4} {r.strain:>7.1f} {r.hrv_status:>12} {rec:>6}{flag}")
     real = [r for r in results if r.recovery_raw is not None]
     print(f"\n{len(results)} days · {len(real)} with a REAL recovery "
-          f"(rest show 58 until the HRV baseline reaches 4 valid nights).")
+          f"(the rest are calibrating until the HRV baseline reaches "
+          f"{BASELINE_MIN_NIGHTS} valid nights — the app shows 'N/{BASELINE_MIN_NIGHTS}').")
 
 
 if __name__ == "__main__":

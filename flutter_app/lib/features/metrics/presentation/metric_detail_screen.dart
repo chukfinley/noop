@@ -490,15 +490,23 @@ class _Contrib {
 _Spec _specFor(MetricKind kind, DayRecord day, EffortScale effortScale) {
   switch (kind) {
     case MetricKind.recovery:
+      final recCalibrating = day.chargeCalibrating;
       return _Spec(
         title: 'Recovery',
-        value: day.charge,
+        value: recCalibrating ? 0 : day.charge,
+        valueLabel: recCalibrating
+            ? '${day.chargeCalibrationNights}/$recoveryCalibrationNightsNeeded'
+            : null,
         ramp: Palette.recoveryStops,
         color: Palette.chargeColor,
-        state: Palette.recoveryState(day.charge),
-        blurb: day.charge < 50
-            ? 'Your body is still catching up. Keep effort moderate and prioritise rest today.'
-            : 'You are well recovered and have headroom for a harder session.',
+        state: recCalibrating ? 'Calibrating' : Palette.recoveryState(day.charge),
+        blurb: recCalibrating
+            ? 'Recovery learns your personal baseline over $recoveryCalibrationNightsNeeded '
+                'full nights before it scores — that avoids a misleading number from too '
+                'little data. Your HRV, resting heart rate and sleep below are already real.'
+            : day.charge < 50
+                ? 'Your body is still catching up. Keep effort moderate and prioritise rest today.'
+                : 'You are well recovered and have headroom for a harder session.',
         field: (d) => d.charge,
         contributors: [
           _Contrib('Heart rate variability', '${day.hrv.round()}', 'ms',

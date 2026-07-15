@@ -122,19 +122,29 @@ class DailyPipeline {
 
     // ── Baselines: score against history, THEN fold tonight in ────────────────
     final hrvUsable = _hrvBase.usable;
-    final charge = (hrv != null && rhr != null)
+    final recoveryVal = (hrv != null && rhr != null)
         ? RecoveryScorer.recovery(
-              hrv: hrv,
-              rhr: rhr.toDouble(),
-              resp: resp,
-              hrvBaseline: DriverBaseline.of(_hrvBase),
-              rhrBaseline: _rhrBase.usable ? DriverBaseline.of(_rhrBase) : null,
-              respBaseline: _respBase.usable ? DriverBaseline.of(_respBase) : null,
-              sleepPerf: sleepPerf,
-              hrvBaselineUsable: hrvUsable,
-            ) ??
-            engines.recoveryPopulationMean
-        : engines.recoveryPopulationMean;
+            hrv: hrv,
+            rhr: rhr.toDouble(),
+            resp: resp,
+            hrvBaseline: DriverBaseline.of(_hrvBase),
+            rhrBaseline: _rhrBase.usable ? DriverBaseline.of(_rhrBase) : null,
+            respBaseline: _respBase.usable ? DriverBaseline.of(_respBase) : null,
+            sleepPerf: sleepPerf,
+            hrvBaselineUsable: hrvUsable,
+          )
+        : null;
+    // While the HRV baseline is still calibrating (or a day has no scoreable
+    // night), recovery is NOT a real score — the app shows a "calibrating
+    // N/needed nights" state instead of a fabricated number. `charge` still
+    // carries the population mean so downstream numeric fields stay finite, but
+    // [DayRecord.chargeCalibrationNights] flags that it must not be shown as a
+    // score. Count includes tonight's night if it produced HRV.
+    final charge = recoveryVal ?? engines.recoveryPopulationMean;
+    final chargeCalibrationNights = recoveryVal != null
+        ? null
+        : math.min(baselineProvisionalMinNights,
+            _hrvBase.nValid + (hrv != null ? 1 : 0));
 
     if (hrv != null) Baselines.update(_hrvBase, 'hrv', hrv);
     if (rhr != null) Baselines.update(_rhrBase, 'resting_hr', rhr.toDouble());
@@ -191,6 +201,7 @@ class DailyPipeline {
     return DayRecord(
       date: day.date,
       charge: _r1(charge),
+      chargeCalibrationNights: chargeCalibrationNights,
       effort: _r1(effort),
       rest: _r1(rest),
       stress: _r1(stress100),

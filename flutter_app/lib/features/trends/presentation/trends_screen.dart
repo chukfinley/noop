@@ -131,13 +131,17 @@ class TrendsScreen extends ConsumerWidget {
       ),
       TrendMetric(
         title: 'Recovery',
-        unit: '%',
+        unit: win.last.chargeCalibrating ? 'nights' : '%',
         color: Palette.chargeColor,
         chart: TrendChart.line,
         daily: field((d) => d.charge),
         dates: dates,
-        valueText: win.last.charge.round().toString(),
-        status: Palette.recoveryState(win.last.charge),
+        valueText: win.last.chargeCalibrating
+            ? '${win.last.chargeCalibrationNights}/$recoveryCalibrationNightsNeeded'
+            : win.last.charge.round().toString(),
+        status: win.last.chargeCalibrating
+            ? 'Calibrating baseline'
+            : Palette.recoveryState(win.last.charge),
         fmt: (v) => v.round().toString(),
         targetLow: 70,
         targetHigh: 100,

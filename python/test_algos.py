@@ -122,5 +122,9 @@ def test_real_db_is_physiologically_sane():
     for r in nights:
         assert 5 <= r.hrv <= 250, f"{r.date}: implausible HRV {r.hrv}"
         assert 30 <= r.rhr <= 120, f"{r.date}: implausible RHR {r.rhr}"
-        assert 0 <= r.recovery_shown <= 100
+        # Recovery is either a real 0..100 score or a calibration state (N/4).
+        if r.recovery_raw is not None:
+            assert 0 <= r.recovery_raw <= 100
+        else:
+            assert 0 <= r.calibration_nights <= A.BASELINE_MIN_NIGHTS
     A.print_report(results)

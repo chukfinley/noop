@@ -612,6 +612,9 @@ class _Hero extends ConsumerWidget {
           value: day.charge,
           ramp: Palette.recoveryStops,
           color: Palette.chargeColor,
+          calibrationText: day.chargeCalibrating
+              ? '${day.chargeCalibrationNights}/$recoveryCalibrationNightsNeeded'
+              : null,
           onTap:
               editing ? null : () => _openDetail(context, MetricKind.recovery),
         );
@@ -758,6 +761,11 @@ class _HeroCell extends ConsumerWidget {
   final Color color;
   final VoidCallback? onTap;
   final bool isEffort;
+
+  /// When set, the metric is not scoreable yet (e.g. recovery is still
+  /// calibrating its baseline): the gauge reads empty and shows this text (like
+  /// "2/4") instead of a misleading number.
+  final String? calibrationText;
   const _HeroCell({
     required this.label,
     required this.value,
@@ -765,14 +773,18 @@ class _HeroCell extends ConsumerWidget {
     required this.color,
     this.onTap,
     this.isEffort = false,
+    this.calibrationText,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final style = ref.watch(gaugeStyleProvider);
-    final centerText = isEffort
-        ? Fmt.effort(value, ref.watch(effortScaleProvider))
-        : value.round().toString();
+    final calibrating = calibrationText != null;
+    final centerText = calibrating
+        ? calibrationText!
+        : (isEffort
+            ? Fmt.effort(value, ref.watch(effortScaleProvider))
+            : value.round().toString());
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -788,17 +800,17 @@ class _HeroCell extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               MetricGauge(
-                fraction: (value / 100).clamp(0, 1),
+                fraction: calibrating ? 0 : (value / 100).clamp(0, 1),
                 ramp: ramp,
                 size: 78,
                 center: Text(centerText,
-                    style: NoopType.number(24).copyWith(
+                    style: NoopType.number(calibrating ? 22 : 24).copyWith(
                       color: gaugeCenterColor(style),
                       shadows: gaugeCenterShadows(style),
                     )),
               ),
               const SizedBox(height: Metrics.space12),
-              Text(label.toUpperCase(),
+              Text(calibrating ? 'CALIBRATING' : label.toUpperCase(),
                   style: NoopType.overline
                       .copyWith(color: color, letterSpacing: 1.6)),
             ],
@@ -978,11 +990,18 @@ class _YourCards extends ConsumerWidget {
         return _MetricChartCard(
           kind: MetricKind.recovery,
           label: 'Recovery',
-          value: day.charge.round().toString(),
-          unit: '%',
-          state: Palette.recoveryState(day.charge),
+          value: day.chargeCalibrating
+              ? '${day.chargeCalibrationNights}/$recoveryCalibrationNightsNeeded'
+              : day.charge.round().toString(),
+          unit: day.chargeCalibrating ? 'nights' : '%',
+          state: day.chargeCalibrating
+              ? 'Calibrating'
+              : Palette.recoveryState(day.charge),
           color: Palette.chargeColor,
-          caption: 'Higher, steadier peaks mean better readiness.',
+          caption: day.chargeCalibrating
+              ? 'Recovery needs $recoveryCalibrationNightsNeeded full nights to '
+                  'learn your baseline. HRV, resting HR & sleep are already real.'
+              : 'Higher, steadier peaks mean better readiness.',
           day: day,
           tappable: !editing,
         );

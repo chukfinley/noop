@@ -107,11 +107,22 @@ class VitalReading {
   });
 }
 
+/// Nights of valid HRV a personal baseline needs before recovery is scoreable.
+/// Matches `baselineProvisionalMinNights` in analytics/baselines.dart.
+const int recoveryCalibrationNightsNeeded = 4;
+
 /// The per-day summary record — the spine of the whole app.
 @immutable
 class DayRecord {
   final DateTime date;
-  final double charge; // recovery 0..100
+  final double charge; // recovery 0..100 (population mean while calibrating)
+
+  /// Non-null while recovery is NOT a real score yet: the count of valid HRV
+  /// nights collected so far (0..[recoveryCalibrationNightsNeeded]). The UI shows
+  /// "Calibrating N/4 nights" instead of [charge] when this is set. Null once the
+  /// baseline has calibrated and [charge] is a genuine recovery score.
+  final int? chargeCalibrationNights;
+
   final double effort; // day strain 0..21
   final double rest; // sleep performance 0..100
   final double stress; // 0..100
@@ -132,6 +143,7 @@ class DayRecord {
   const DayRecord({
     required this.date,
     required this.charge,
+    this.chargeCalibrationNights,
     required this.effort,
     required this.rest,
     required this.stress,
@@ -175,6 +187,9 @@ class DayRecord {
       DayRecord(
         date: date,
         charge: charge ?? this.charge,
+        // Carried through by default: an alt engine that also needs N nights to
+        // score recovery is calibrating in the same window (see OpenStrapEngine).
+        chargeCalibrationNights: chargeCalibrationNights,
         effort: effort ?? this.effort,
         rest: rest ?? this.rest,
         stress: stress ?? this.stress,
@@ -192,6 +207,10 @@ class DayRecord {
         workouts: workouts ?? this.workouts,
         hr: hr ?? this.hr,
       );
+
+  /// True while recovery ([charge]) is not yet a real score — the UI shows a
+  /// "Calibrating N/[recoveryCalibrationNightsNeeded]" state instead of a number.
+  bool get chargeCalibrating => chargeCalibrationNights != null;
 }
 
 /// User profile — drives HR-max, sleep-need, units.
