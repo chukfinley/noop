@@ -136,6 +136,10 @@ class TodayScreen extends ConsumerWidget {
             // (shown timestamped, "87 · 2h ago"). Only "—" when there's never been one.
             battery: ref.watch(liveBatteryProvider).value,
             lastKnownBattery: ref.watch(lastKnownBatteryProvider),
+            // Real "actively syncing right now" signal: the BLE link is in its
+            // offload state, or the historical-offload progress is running.
+            syncing: ref.watch(bleConnectionProvider).value?.name == 'syncing' ||
+                ref.watch(syncProgressProvider).value?.phase == 'offloading',
             isToday: idx == maxI,
             canPrev: idx > 0,
             canNext: idx < maxI,
@@ -288,6 +292,7 @@ class _Scene extends StatelessWidget {
   final DayRecord day;
   final double? battery;
   final LastKnownBattery? lastKnownBattery;
+  final bool syncing;
   final bool isToday;
   final bool canPrev;
   final bool canNext;
@@ -297,6 +302,7 @@ class _Scene extends StatelessWidget {
     required this.day,
     required this.battery,
     required this.lastKnownBattery,
+    this.syncing = false,
     required this.isToday,
     required this.canPrev,
     required this.canNext,
@@ -348,7 +354,9 @@ class _Scene extends StatelessWidget {
               onTap: () => Navigator.of(context)
                   .push(noopRoute(const DeviceSettingsScreen())),
               child: _StrapBattery(
-                  level: battery, lastKnown: lastKnownBattery),
+                  level: battery,
+                  lastKnown: lastKnownBattery,
+                  syncing: syncing),
             ),
           ),
         ),
@@ -410,7 +418,9 @@ class _HeartRatePill extends ConsumerWidget {
 class _StrapBattery extends StatelessWidget {
   final double? level;
   final LastKnownBattery? lastKnown;
-  const _StrapBattery({required this.level, this.lastKnown});
+  final bool syncing;
+  const _StrapBattery(
+      {required this.level, this.lastKnown, this.syncing = false});
 
   @override
   Widget build(BuildContext context) {
@@ -434,6 +444,15 @@ class _StrapBattery extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // Live "actively syncing" affordance: a spinning glyph + label, shown
+          // only while an offload is genuinely running (see _Scene.syncing).
+          if (syncing) ...[
+            const _SyncSpinner(),
+            const SizedBox(width: 5),
+            Text('Syncing',
+                style: NoopType.caption.copyWith(color: Palette.accent)),
+            const SizedBox(width: 8),
+          ],
           _BatteryGlyph(level: has ? l : 0, color: color),
           const SizedBox(width: 5),
           Text(has ? '${(l * 100).round()}' : '—',
@@ -461,6 +480,35 @@ class _StrapBattery extends StatelessWidget {
     if (d.inHours < 24) return '${d.inHours}h ago';
     return '${d.inDays}d ago';
   }
+}
+
+/// A continuously-rotating sync glyph — the "it's actively syncing right now"
+/// affordance next to the strap battery. Rotates only while mounted (i.e. only
+/// while the offload is running), so it can't imply activity that isn't there.
+class _SyncSpinner extends StatefulWidget {
+  const _SyncSpinner();
+  @override
+  State<_SyncSpinner> createState() => _SyncSpinnerState();
+}
+
+class _SyncSpinnerState extends State<_SyncSpinner>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => RotationTransition(
+        turns: _c,
+        child: Icon(Icons.sync_rounded, size: 13, color: Palette.accent),
+      );
 }
 
 class _BatteryGlyph extends StatelessWidget {

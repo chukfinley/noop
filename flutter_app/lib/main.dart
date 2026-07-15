@@ -56,6 +56,20 @@ Future<void> main() async {
   );
   kickWhoopAutoConnect(container);
 
+  // Auto-connect the moment Bluetooth is switched ON (by any means — the in-app
+  // "Turn on" banner, Android quick-settings, …): if a strap is remembered,
+  // reconnect and offload. connectRemembered() runs a scan then a direct
+  // reconnect, so a sync begins a few seconds after the adapter powers on — the
+  // "turn on Bluetooth → strap connects → sync starts" behaviour the user wants.
+  // Fires only on the false→true transition, and only on a real BLE platform.
+  container.listen<AsyncValue<bool>>(bleAdapterOnProvider, (prev, next) {
+    final wasOn = prev?.valueOrNull ?? false;
+    final isOn = next.valueOrNull ?? false;
+    if (!wasOn && isOn && container.read(pairedStrapProvider) != null) {
+      unawaited(container.read(whoopBleClientProvider).connectRemembered());
+    }
+  });
+
   // Re-derive scores as new strap data lands: a debounced listen on the WHOOP
   // biometric stream tables rebuilds the live repository and swaps it into
   // repositoryProvider, so every day-driven surface grows as syncs complete

@@ -80,7 +80,7 @@
         android:required="false" />
 
     <application
-        android:label="noop"
+        android:label="NOOP"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -108,13 +108,13 @@
         <!-- flutter_foreground_task's persistent foreground service. The class name is fixed by
              the plugin (do not rename). connectedDevice type = we hold an active BLE link to the
              WHOOP strap; reuses the already-declared FOREGROUND_SERVICE(+_CONNECTED_DEVICE) perms.
-             stopWithTask=true so the service also ends if the user swipes the app away. Killed-app
-             sync is handled separately by the periodic WorkManager job (background_sync_worker.dart),
-             which wakes a headless isolate after the process is gone; the two complement each other. -->
+             stopWithTask=false so the service (and its sync + notification) SURVIVES the user
+             swiping the app away — matching the original app. The periodic WorkManager job
+             (background_sync_worker.dart) still complements it after a full process kill. -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:foregroundServiceType="connectedDevice"
-            android:stopWithTask="true"
+            android:stopWithTask="false"
             android:exported="false" />
 
         <!-- Don't delete the meta-data below.

@@ -305,11 +305,12 @@ class DeviceSettingsScreen extends ConsumerWidget {
                 icon: Icons.favorite_rounded,
                 iconColor:
                     broadcast ? Palette.metricRose : Palette.textTertiary,
-                title: 'Broadcast heart rate',
+                title: 'Broadcast HR — from phone',
                 detail:
-                    'Re-share your live heart rate over Bluetooth as a standard '
-                    'sensor — a treadmill, bike, Zwift or Peloton nearby can '
-                    'read it. Local Bluetooth only, nothing leaves your phone.',
+                    'Your PHONE re-shares the live heart rate it receives from '
+                    'the strap, as a standard Bluetooth HR sensor a treadmill, '
+                    'bike, Zwift or Peloton can read. Needs the app connected to '
+                    'the strap. Local Bluetooth only, nothing leaves your phone.',
                 trailing: NoopToggle(
                   value: broadcast,
                   onChanged: (v) => ref
@@ -334,11 +335,12 @@ class DeviceSettingsScreen extends ConsumerWidget {
                   iconColor: strapBroadcast
                       ? Palette.metricRose
                       : Palette.textTertiary,
-                  title: 'Broadcast HR from strap',
+                  title: 'Broadcast HR — from strap',
                   detail:
-                      'Have the WHOOP band itself advertise your heart rate as a '
+                      'The WHOOP band ITSELF advertises your heart rate as a '
                       'standard Bluetooth sensor — a Garmin, Zwift or gym machine '
-                      'can read it directly, even when your phone is away.',
+                      'reads it directly, no phone needed. Different from the '
+                      'phone option above: this works even with your phone away.',
                   trailing: NoopToggle(
                     value: strapBroadcast,
                     onChanged: (v) => _setStrapBroadcastHr(ref, v),

@@ -5,7 +5,7 @@ publish_to: 'none'
 # (which must monotonically increase for in-place updates) is derived
 # automatically from the clock in android/app/build.gradle.kts, so it never
 # needs bumping and never appears in a public release.
-version: 8.2.7
+version: 8.2.8
 
 environment:
   sdk: ^3.9.0
