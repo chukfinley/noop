@@ -43,7 +43,13 @@ android {
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
+        // Auto versionCode = minutes since 2020-01-01. Android requires an
+        // ever-increasing integer for in-place updates; deriving it from the
+        // clock means it always increases, never needs a manual bump, and never
+        // leaks a "+buildNumber" into the user-facing version. ~3.3M today, well
+        // under the 2.1B ceiling, monotonic for centuries — and far above the
+        // last hand-set code (175) so existing installs still update cleanly.
+        versionCode = ((System.currentTimeMillis() / 60000L) - 26_300_000L).toInt()
         versionName = flutter.versionName
     }
 

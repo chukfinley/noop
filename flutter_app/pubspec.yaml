@@ -1,7 +1,11 @@
 name: noop
 description: "NOOP — recovery, sleep & strain tracker (Flutter port)."
 publish_to: 'none'
-version: 8.2.5+175
+# User-facing version only — NO `+buildNumber`. Android's mandatory versionCode
+# (which must monotonically increase for in-place updates) is derived
+# automatically from the clock in android/app/build.gradle.kts, so it never
+# needs bumping and never appears in a public release.
+version: 8.2.5
 
 environment:
   sdk: ^3.9.0
@@ -33,6 +37,7 @@ dependencies:
   file_picker: ^8.1.6 # pick a backup file to import (SAF on Android)
   share_plus: ^10.1.4 # share/save the exported .noopbak out of the app
   flutter_svg: ^2.0.10+1 # render the bundled NOOP vector logos in-app
+  package_info_plus: ^8.0.0 # show the real app version in About (no build number)
 
 dev_dependencies:
   flutter_test:

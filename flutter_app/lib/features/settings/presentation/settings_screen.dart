@@ -1,6 +1,7 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
@@ -909,9 +910,7 @@ class _AboutScreen extends StatelessWidget {
                   icon: Icons.info_rounded,
                   iconColor: Palette.textSecondary,
                   title: 'Version',
-                  trailing: Text('8.0.1 (build 168)',
-                      style: NoopType.body
-                          .copyWith(color: Palette.textSecondary)),
+                  trailing: const _VersionText(),
                 ),
             (r) => SettingsTile(
                   radius: r,
@@ -922,6 +921,33 @@ class _AboutScreen extends StatelessWidget {
                 ),
           ]),
         ],
+      );
+}
+
+/// The real app version, resolved at runtime — just the version name (e.g.
+/// "8.2.5"), never the internal Android build number. So this never goes stale
+/// and never shows the "+buildNumber" noise.
+class _VersionText extends StatefulWidget {
+  const _VersionText();
+  @override
+  State<_VersionText> createState() => _VersionTextState();
+}
+
+class _VersionTextState extends State<_VersionText> {
+  String _version = '';
+
+  @override
+  void initState() {
+    super.initState();
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) setState(() => _version = info.version);
+    }).catchError((_) {});
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(
+        _version.isEmpty ? '…' : _version,
+        style: NoopType.body.copyWith(color: Palette.textSecondary),
       );
 }
 
