@@ -6,7 +6,7 @@ import 'package:noop/core/analytics/raw_samples.dart';
 import 'package:noop/core/data/db/database.dart' show AppDatabase;
 import 'package:noop/core/data/models.dart';
 import 'package:noop/core/data/repository.dart';
-import 'package:noop/core/state/prefs.dart' show HrvWindow;
+import 'package:noop/core/state/prefs.dart' show HrvWindow, Prefs;
 
 /// Repository backed PURELY by live strap-synced data in the local drift store —
 /// no bundled history. It starts EMPTY and grows as the WHOOP strap offloads its
@@ -76,30 +76,34 @@ class LiveRepository implements Repository {
   }) async {
     final days = await _buildDays(db);
     if (days.isEmpty) return LiveRepository._(profile, const {}, const []);
-    // Score every engine OFF the main isolate. The analytics are CPU-bound —
-    // OpenStrap's per-night Lomb-Scargle spectral work especially — and this
-    // runs on EVERY debounced sync reload, so doing it on the render thread
-    // froze the UI (worse the more days are synced). `Isolate.run` copies the
-    // raw days out, computes on a background isolate, and copies the scored days
-    // back, keeping the UI smooth. Engine switching stays instant because all
-    // engines are computed up-front and cached.
+    // Score ONLY the engines we actually need — the default (the app-wide
+    // fallback) plus the one the user is currently viewing. Running every engine
+    // on every debounced sync reload was the heat/lag culprit: OpenStrap's
+    // per-night Lomb-Scargle is expensive, and re-doing it constantly over a
+    // large synced store pegged the CPU. A not-yet-computed engine is scored on
+    // demand when the user switches to it (main.dart re-loads on that change).
+    final wanted = <String>{defaultEngineId, Prefs.instance.analysisEngineId};
+    // Compute OFF the main isolate so the heavy math never touches the render
+    // thread; `Isolate.run` copies the raw days out and the scored days back.
     final byEngine =
-        await Isolate.run(() => _scoreAllEngines(days, profile, hrvWindow));
+        await Isolate.run(() => _scoreEngines(days, profile, hrvWindow, wanted));
     if (byEngine.isEmpty) return LiveRepository._(profile, const {}, const []);
     final primary = byEngine[defaultEngineId] ?? byEngine.values.first;
     return LiveRepository._(profile, byEngine, _buildVitals(primary));
   }
 
-  /// Run every registered engine over [days] and collect their scored days by
-  /// engine id. Pure + isolate-safe (no DB, no Flutter bindings) so it can run
-  /// on a background isolate — see [load].
-  static Map<String, List<DayRecord>> _scoreAllEngines(
+  /// Run the [wanted] engines over [days] and collect their scored days by engine
+  /// id. Pure + isolate-safe (no DB, no Flutter bindings) so it can run on a
+  /// background isolate — see [load].
+  static Map<String, List<DayRecord>> _scoreEngines(
     List<RawDay> days,
     UserProfile profile,
     HrvWindow hrvWindow,
+    Set<String> wanted,
   ) {
     final byEngine = <String, List<DayRecord>>{};
     for (final engine in engineRegistry) {
+      if (!wanted.contains(engine.id)) continue;
       final scored = engine.analyze(days, profile, hrvWindow: hrvWindow);
       if (scored.isNotEmpty) byEngine[engine.id] = scored;
     }

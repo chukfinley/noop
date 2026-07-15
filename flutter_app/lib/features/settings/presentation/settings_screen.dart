@@ -840,6 +840,13 @@ class _DataSettings extends ConsumerWidget {
             kind: ToastKind.warning);
         return;
       }
+      // Trigger a live re-score: the import wrote rows via raw SQL that drift's
+      // stream tracking misses, so bump the revision counter that `main()`
+      // watches. The pipeline re-derives the imported days right away — no
+      // restart needed.
+      if (summary.totalRows > 0) {
+        ref.read(dataRevisionProvider.notifier).state++;
+      }
       await showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -849,7 +856,7 @@ class _DataSettings extends ConsumerWidget {
           content: Text(
             summary.totalRows == 0
                 ? 'This backup was already in your data — nothing new to add.'
-                : 'Your history was merged in. Restart NOOP to see it analysed.',
+                : 'Your history was merged in and is being analysed now.',
             style: NoopType.body.copyWith(color: Palette.textSecondary),
           ),
           actions: [

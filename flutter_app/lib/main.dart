@@ -121,25 +121,55 @@ class _BackgroundSyncLifecycleObserver extends WidgetsBindingObserver {
 /// writes many rows in bursts. Never cancelled — it lives for the app's lifetime.
 void _wireLiveReload(ProviderContainer container, AppDatabase db) {
   Timer? debounce;
+  var loading = false; // a rebuild is in flight
+  var pending = false; // another was requested while one was running
+
+  // Rebuild the repository, guarded so at most ONE runs at a time. Extra
+  // requests during a run collapse into a single trailing rebuild. Without this
+  // guard a long offload (which writes rows in bursts) could start overlapping
+  // full re-scores of the whole store — the CPU peg that overheated the phone.
+  Future<void> reload() async {
+    if (loading) {
+      pending = true;
+      return;
+    }
+    loading = true;
+    try {
+      final fresh =
+          await LiveRepository.load(db, hrvWindow: Prefs.instance.hrvWindow);
+      container.updateOverrides([
+        repositoryProvider.overrideWithValue(fresh),
+        databaseProvider.overrideWithValue(db),
+      ]);
+    } catch (e, st) {
+      debugPrint('live reload failed: $e\n$st');
+    } finally {
+      loading = false;
+      if (pending) {
+        pending = false;
+        unawaited(reload()); // run the coalesced trailing rebuild once
+      }
+    }
+  }
+
   db.watchWhoopStreams().listen((_) {
     debounce?.cancel();
     // A longer settle window than the raw stream cadence: one offload writes
     // rows in dense bursts, and each rebuild re-queries the whole store and
-    // re-scores every engine (off-isolate, but still real work). Coalescing to
-    // ~2 s keeps a long sync from triggering a rebuild storm.
-    debounce = Timer(const Duration(milliseconds: 2000), () async {
-      try {
-        final fresh =
-            await LiveRepository.load(db, hrvWindow: Prefs.instance.hrvWindow);
-        container.updateOverrides([
-          repositoryProvider.overrideWithValue(fresh),
-          databaseProvider.overrideWithValue(db),
-        ]);
-      } catch (e, st) {
-        debugPrint('live reload failed: $e\n$st');
-      }
-    });
+    // re-scores the active engine. Coalescing to ~2 s keeps a long sync from
+    // triggering a rebuild storm.
+    debounce = Timer(const Duration(milliseconds: 2000), reload);
   });
+
+  // Switching analysis engine only re-points the UI at that engine's scores —
+  // but a not-yet-computed engine has to be scored first. Rebuild on the change
+  // so the newly-selected engine is computed on demand (guarded/off-isolate).
+  container.listen<String>(selectedEngineProvider, (_, __) => reload());
+
+  // A data import writes rows via raw SQL that drift's stream tracking misses,
+  // so rebuild when the import counter bumps — otherwise imported history would
+  // only surface after a restart or the next strap sync.
+  container.listen<int>(dataRevisionProvider, (_, __) => reload());
 }
 
 /// Hides the scrollbar on every scrollable (desktop shows one by default).

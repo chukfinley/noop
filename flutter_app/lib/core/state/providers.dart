@@ -56,6 +56,13 @@ final daysByEngineProvider = Provider<Map<String, List<DayRecord>>>(
 final selectedEngineProvider =
     StateProvider<String>((ref) => Prefs.instance.analysisEngineId);
 
+/// Bumped whenever the local store is mutated OUTSIDE the live strap stream —
+/// today that means a data import. A raw `customStatement` import bypasses
+/// drift's table-update tracking, so the stream-driven live reload wouldn't
+/// notice it; `main()` watches this counter and rebuilds the repository so an
+/// import is scored immediately (not only after a restart or the next sync).
+final dataRevisionProvider = StateProvider<int>((_) => 0);
+
 /// All days oldest → newest, for the SELECTED analysis engine. Falls back to the
 /// default engine (then empty) when the selected engine produced nothing.
 final daysProvider = Provider<List<DayRecord>>((ref) {
