@@ -1,7 +1,7 @@
 name: noop
 description: "NOOP — recovery, sleep & strain tracker (Flutter port)."
 publish_to: 'none'
-version: 8.2.4+174
+version: 8.2.5+175
 
 environment:
   sdk: ^3.9.0

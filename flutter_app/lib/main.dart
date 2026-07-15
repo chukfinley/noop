@@ -123,7 +123,11 @@ void _wireLiveReload(ProviderContainer container, AppDatabase db) {
   Timer? debounce;
   db.watchWhoopStreams().listen((_) {
     debounce?.cancel();
-    debounce = Timer(const Duration(milliseconds: 600), () async {
+    // A longer settle window than the raw stream cadence: one offload writes
+    // rows in dense bursts, and each rebuild re-queries the whole store and
+    // re-scores every engine (off-isolate, but still real work). Coalescing to
+    // ~2 s keeps a long sync from triggering a rebuild storm.
+    debounce = Timer(const Duration(milliseconds: 2000), () async {
       try {
         final fresh =
             await LiveRepository.load(db, hrvWindow: Prefs.instance.hrvWindow);
