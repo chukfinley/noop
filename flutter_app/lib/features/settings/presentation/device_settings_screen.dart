@@ -658,16 +658,21 @@ class DeviceSettingsScreen extends ConsumerWidget {
         ),
       );
 
-  /// Best-effort power-on: `connect()` turns the adapter on first (Android) then
-  /// scans; off Android it surfaces a clear "turn it on" error we relay honestly.
+  /// The ONLY place that raises the system "turn on Bluetooth?" dialog — an
+  /// explicit user tap. Idempotent and guarded, so it can't stack prompts. On
+  /// success the banner hides reactively (it watches [bleAdapterOnProvider]) and
+  /// we kick a reconnect WITHOUT re-prompting; on failure we relay the error once.
   Future<void> _turnOnBluetooth(BuildContext context, WidgetRef ref) async {
-    noopToast(context, 'Turning Bluetooth on…');
-    // connectRemembered() turns the adapter on first (Android) then reconnects the
-    // remembered band, or runs a universal auto-detecting scan when none is remembered.
-    await ref.read(whoopBleClientProvider).connectRemembered();
+    final client = ref.read(whoopBleClientProvider);
+    final ok = await client.enableAdapter();
     if (!context.mounted) return;
-    final err = ref.read(whoopBleClientProvider).lastError;
-    if (err != null) noopToast(context, err, kind: ToastKind.warning);
+    if (ok) {
+      // Adapter is on now — reconnect the remembered strap (no enable prompt).
+      unawaited(client.connectRemembered());
+    } else {
+      noopToast(context, client.lastError ?? 'Could not turn Bluetooth on.',
+          kind: ToastKind.warning);
+    }
   }
 
   /// The live-progress card for a running/just-finished historical offload —

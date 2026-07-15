@@ -566,7 +566,7 @@ class WhoopBleClient {
   /// Whether the Bluetooth adapter is powered on, best-effort turning it on first (Android only).
   /// Sets [lastError] and returns false when it stays off. Inert (returns true) off-device so tests
   /// never touch the radio. Mirrors the Kotlin `adapter.isEnabled` gate + `ACTION_REQUEST_ENABLE`.
-  Future<bool> _ensureAdapterOn() async {
+  Future<bool> _ensureAdapterOn({bool promptIfOff = false}) async {
     if (!_blePlatform) return true;
     try {
       final state = await FlutterBluePlus.adapterState.first;
@@ -575,9 +575,13 @@ class WhoopBleClient {
       _log('adapterState read failed: $e — proceeding');
       return true; // a read failure shouldn't hard-block a connect attempt
     }
-    // Best-effort power-on. `turnOn()` completes once the adapter reaches ON (Android only); iOS has
-    // no programmatic toggle, so we can only surface the error there.
-    if (Platform.isAndroid) {
+    // Adapter is OFF. The system "turn on Bluetooth?" dialog may ONLY be raised on
+    // an explicit user action ([promptIfOff]). Automatic paths — auto-reconnect,
+    // the auto-connect kick, background-sync nudges — must NEVER prompt: doing so
+    // popped the enable dialog over and over ("aggressive on every request").
+    // `turnOn()` completes once the adapter reaches ON (Android only); iOS has no
+    // programmatic toggle.
+    if (promptIfOff && Platform.isAndroid) {
       try {
         await FlutterBluePlus.turnOn();
         final state = await FlutterBluePlus.adapterState.first;
@@ -587,8 +591,23 @@ class WhoopBleClient {
       }
     }
     lastError = 'Bluetooth is off. Turn it on, then tap Connect.';
-    _log('Bluetooth is off');
+    _log('Bluetooth is off (promptIfOff=$promptIfOff)');
     return false;
+  }
+
+  /// Explicit user request to power the adapter on — the ONLY path allowed to
+  /// raise the Android system enable dialog. Idempotent: returns true immediately
+  /// when already on (no dialog), so tapping twice can't stack prompts. Guarded so
+  /// a rapid double-tap doesn't fire two dialogs.
+  bool _enablingAdapter = false;
+  Future<bool> enableAdapter() async {
+    if (_enablingAdapter) return false;
+    _enablingAdapter = true;
+    try {
+      return await _ensureAdapterOn(promptIfOff: true);
+    } finally {
+      _enablingAdapter = false;
+    }
   }
 
   /// Discover EVERY nearby WHOOP strap (both families) so the UI can show a picker instead of
