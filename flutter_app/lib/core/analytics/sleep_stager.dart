@@ -53,6 +53,29 @@ class SleepStager {
   static const double _hrSleepMargin = 13.0; // bpm above floor still "asleep"
   static const double _hrWakeMargin = 12.0; // bpm above baseline ≈ awake
 
+  // ── Motion-corroborated wake (#462) ──────────────────────────────────────
+  //
+  // The rule upstream settled on: elevated HR ALONE is insufficient to call
+  // WAKE. On a night that holds resting HR up WITHOUT the wearer getting up — a
+  // supplement protocol, a fever, a hot room, alcohol — HR-led wake logic reads
+  // hot-but-motionless sleep as wake: it over-calls WASO, mis-places onset, and
+  // tanks efficiency. `SleepStagerV2` implements this by clamping the AWAKE
+  // emission's cardiac term to <= 0 on a motion-quiescent epoch — the
+  // wake-SUPPRESSING (low, flat HR) half is kept, the wake-PROMOTING half
+  // dropped. BOTH of this heuristic's wake branches are cardiac-driven, so the
+  // same policy here reads: a motion-quiescent epoch cannot be scored awake on
+  // cardiac evidence at all. It falls through to the normal deep/REM/light
+  // banding, where an elevated HR still reads REM exactly as it does upstream.
+  // Wake is never invented and no pro-sleep evidence is removed, so a night
+  // that actually moved stages identically.
+  //
+  // The floor is NIGHT-RELATIVE, mirroring V2's `jerkScale` (the night's own
+  // median per-second jerk), NOT an absolute g bar: [epochMovement] is |accel|
+  // in g, so a motionless wrist reads ~1.0 g (gravity) and NEVER ~0. A fixed
+  // threshold cannot separate stillness from motion across straps,
+  // gravity-decode scales or wear positions.
+  static const double _quiescentMadMult = 4.0; // within floor ± this × MAD ≈ still
+
   /// epochTs/epochHr/epochMovement are parallel & time-ordered over ~24h of
   /// ONE day. epochHr entries may be null (no HR that epoch). epochMovement is
   /// |accel| in g. Returns null if no plausible sleep window (>= ~2h) is found.
@@ -126,20 +149,28 @@ class SleepStager {
     final remBand = baseline + 3.0; // elevated above deep, movement tiny
 
     // ── 2. Stage each epoch in the window.
+    // Motion corroboration for the wake calls below (#462), measured against
+    // THIS window's own movement so the floor is this night's quiescent level.
+    final quiescent = motionQuiescent(epochMovement.sublist(lo, hi + 1));
     final stages = List<SleepStageK>.filled(winLen, SleepStageK.light);
     for (var i = lo; i <= hi; i++) {
       final k = i - lo;
       final h = epochHr[i];
       final mv = epochMovement[i];
       final nightFrac = winLen > 1 ? k / (winLen - 1) : 0.0;
+      // The wrist did not move this epoch → no cardiac evidence, however
+      // elevated, may vote it awake (#462); it falls through to the bands below.
+      final still = quiescent[k];
 
-      // HR-driven staging (the accel scalar is too noisy to gate on here; it is
-      // used only as a strong corroborating signal for awakenings).
-      if (h == null || h > baseline + _hrWakeMargin) {
+      // HR-driven staging, motion-corroborated: HR picks the stage, but a wake
+      // call additionally requires that the wrist actually moved.
+      if (h == null) {
         // A missing HR inside the window is a dropout, not a real awakening —
         // keep it light rather than fragmenting the night.
-        stages[k] = h == null ? SleepStageK.light : SleepStageK.awake;
-      } else if (mv >= _moveWake * 4 && h > baseline) {
+        stages[k] = SleepStageK.light;
+      } else if (!still && h > baseline + _hrWakeMargin) {
+        stages[k] = SleepStageK.awake;
+      } else if (!still && mv >= _moveWake * 4 && h > baseline) {
         stages[k] = SleepStageK.awake;
       } else if (h <= deepBand && nightFrac < 0.65) {
         // Deep: lowest HR band, weighted to the first half of the night.
@@ -245,6 +276,33 @@ class SleepStager {
     }
     if (bestLo == null) return null;
     return [bestLo, bestHi!];
+  }
+
+  /// Per-epoch "the wrist did not move this epoch" verdicts over ONE night's
+  /// movement trace (motion-corroborated wake, #462). [windowMovement] is the
+  /// |accel| in g of the sleep window's epochs, in order.
+  ///
+  /// An epoch is quiescent when its movement sits within [_quiescentMadMult]
+  /// median-absolute-deviations of the window's OWN median movement — the
+  /// night-relative analogue of V2's `jerkMax <= jerkScale * jerkFloorGateMult`.
+  /// The median is the night's quiescent level (~1 g of gravity on a still
+  /// wrist) and the MAD is the night's own motion scale, so the verdict
+  /// self-calibrates to the strap's decode scale and the fit instead of pinning
+  /// a g value that means different things on different nights. The multiplier
+  /// sits well above 1 because the MAD is by construction the deviation half the
+  /// epochs already exceed; at 4 MADs a still night's sensor noise stays
+  /// quiescent while a real excursion does not.
+  ///
+  /// A trace with a zero MAD (every epoch at the same coarsely-quantised value)
+  /// admits only epochs exactly at the floor, so the verdict degrades toward the
+  /// strict pre-corroboration behaviour rather than waving wake through.
+  /// Pure + deterministic.
+  static List<bool> motionQuiescent(List<double> windowMovement) {
+    if (windowMovement.isEmpty) return const <bool>[];
+    final floor = _median(windowMovement);
+    final dev = <double>[for (final m in windowMovement) (m - floor).abs()];
+    final gate = _median(dev) * _quiescentMadMult;
+    return <bool>[for (final d in dev) d <= gate];
   }
 
   /// Crude respiratory-rate proxy: count up/down cycles of the smoothed
