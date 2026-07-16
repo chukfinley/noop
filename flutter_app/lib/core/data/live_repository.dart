@@ -1,6 +1,7 @@
 import 'dart:isolate';
 import 'dart:math' as math;
 
+import 'package:drift/drift.dart';
 import 'package:noop/core/analytics/engine_registry.dart';
 import 'package:noop/core/analytics/raw_samples.dart';
 import 'package:noop/core/data/db/database.dart' show AppDatabase;
@@ -114,14 +115,95 @@ class LiveRepository implements Repository {
   /// the same shape the pipeline consumes:
   /// one [RawSample] per unix-second, merging the second's HR, its beat-to-beat
   /// RR intervals and its accel-magnitude.
+  ///
+  /// Walks the store ONE LOCAL DAY AT A TIME rather than slurping whole tables.
+  /// This is the same grouping as before — a second belongs to the local calendar
+  /// day it falls in — reached from the other end: instead of asking each second
+  /// "which day are you?", we ask each day "which seconds are yours?" and let
+  /// SQLite answer from the v5 `ts` index. Two measured problems drove it, both on
+  /// the 30-day store (`_buildDays` totalled 27.2 s there, and cost scales linearly
+  /// with total history — a 90-day store measured 78.7 s PER RELOAD, and a reload
+  /// fires on every debounced sync tick):
+  ///
+  ///  * **Per-second local-time conversion — 12.8 s of the 27.2 s.** The old code
+  ///    ran `DateTime.fromMillisecondsSinceEpoch` + `DateTime(y, m, d)` for EVERY
+  ///    synced second (2.4 M of them at 30 days) purely to derive a bucket key.
+  ///    Both constructors hit the timezone database. Measured in isolation: 10.3 s
+  ///    for 2.4 M conversions, versus 57 ms for the integer compare below — 180x.
+  ///    A day's local bounds do not vary within the day, so the conversion belongs
+  ///    once per DAY, not once per second. `DateTime(y, m, d + 1)` steps local
+  ///    midnights and stays correct across DST (consecutive local midnights are 23
+  ///    or 25 h apart there; differencing instants or adding 86400 would not).
+  ///
+  ///  * **Peak memory — the whole store materialised at once.** Four full
+  ///    `select().get()` calls held every row of every stream as a drift data class
+  ///    simultaneously. Measured: RSS 337 MB → 1626 MB on the hrSample read alone
+  ///    at 30 days (~550 B per row — each row carries its own `deviceId` String
+  ///    this function never reads). Extrapolated to 90 days that is an OOM kill on
+  ///    a phone, not a slowdown. Windowed reads hold ONE day (~44 MB) at a time;
+  ///    the same 30-day walk peaked at 498 MB, and the read got FASTER too (3.6 s
+  ///    vs 8.2 s) because SQLite skips the rows outside the window.
+  ///
+  /// The `ts` index is what keeps this linear — without it each window is a full
+  /// table scan and the walk is O(days x totalRows). See [WhoopHrSamples].
   static Future<List<RawDay>> _buildDays(AppDatabase db) async {
-    final hrRows = await db.select(db.whoopHrSamples).get();
-    if (hrRows.isEmpty) return const [];
-    final rrRows = await db.select(db.whoopRrIntervals).get();
-    final gravRows = await db.select(db.whoopGravitySamples).get();
-    final sleepStateRows = await db.select(db.whoopSleepStateSamples).get();
+    // No HR anywhere → no scoreable day (the pipeline drops any day with under a
+    // minute of HR), so nothing downstream can come of a walk. Preserved verbatim
+    // from the full-read version, which bailed on an empty hrSample the same way.
+    final range = await db.whoopStreamTsRange();
+    if (range == null) return const [];
+    final (minTs, maxTs) = range;
+    final hasHr = await db.whoopHasAnyHr();
+    if (!hasHr) return const [];
 
-    // ts (unix seconds) → mutable per-second builder.
+    final out = <RawDay>[];
+    // Local midnight of the first synced second — the walk's origin.
+    final first = DateTime.fromMillisecondsSinceEpoch(minTs * 1000);
+    var dayStart = DateTime(first.year, first.month, first.day);
+
+    while (dayStart.millisecondsSinceEpoch ~/ 1000 <= maxTs) {
+      // The NEXT local midnight. Built from the calendar fields (not by adding 24 h)
+      // so month/year rollover and DST transitions are handled by DateTime itself.
+      final nextDay = DateTime(dayStart.year, dayStart.month, dayStart.day + 1);
+      final startSec = dayStart.millisecondsSinceEpoch ~/ 1000;
+      final endSec = nextDay.millisecondsSinceEpoch ~/ 1000;
+
+      final samples = await _buildDaySamples(db, startSec, endSec);
+      // A day nobody wore the strap yields no RawDay at all — same as the old
+      // bucketing, which simply had no bucket key for it.
+      if (samples.isNotEmpty) out.add(RawDay(dayStart, samples));
+      dayStart = nextDay;
+    }
+    return out;
+  }
+
+  /// The [RawSample]s of the single local day spanning `[startSec, endSec)`, built
+  /// from four windowed reads. Only this day's rows are ever materialised.
+  static Future<List<RawSample>> _buildDaySamples(
+    AppDatabase db,
+    int startSec,
+    int endSec,
+  ) async {
+    // `isBetweenValues` is inclusive on both ends, so the upper bound is the day's
+    // last second — never `endSec` itself, which is the NEXT day's first second and
+    // must not be double-counted into two days.
+    Future<List<T>> window<T extends DataClass, X extends HasResultSet>(
+      ResultSetImplementation<X, T> table,
+      GeneratedColumn<int> ts,
+    ) =>
+        (db.select(table)..where((_) => ts.isBetweenValues(startSec, endSec - 1)))
+            .get();
+
+    final hrRows = await window(db.whoopHrSamples, db.whoopHrSamples.ts);
+    final rrRows = await window(db.whoopRrIntervals, db.whoopRrIntervals.ts);
+    final gravRows =
+        await window(db.whoopGravitySamples, db.whoopGravitySamples.ts);
+    final sleepStateRows =
+        await window(db.whoopSleepStateSamples, db.whoopSleepStateSamples.ts);
+
+    // ts (unix seconds) → mutable per-second builder. Scoped to ONE day now; the
+    // merge itself is unchanged, and the channels are order-independent (each
+    // writes its own field).
     final byTs = <int, _SampleBuilder>{};
     _SampleBuilder at(int ts) => byTs.putIfAbsent(ts, () => _SampleBuilder(ts));
 
@@ -147,20 +229,8 @@ class LiveRepository implements Repository {
       at(r.ts).mv = mag;
     }
 
-    // Bucket by LOCAL calendar day (the device's own timezone), oldest → newest.
-    final buckets = <int, List<RawSample>>{};
     final tss = byTs.keys.toList()..sort();
-    for (final ts in tss) {
-      final local = DateTime.fromMillisecondsSinceEpoch(ts * 1000);
-      final key =
-          DateTime(local.year, local.month, local.day).millisecondsSinceEpoch;
-      (buckets[key] ??= <RawSample>[]).add(byTs[ts]!.build());
-    }
-    final keys = buckets.keys.toList()..sort();
-    return [
-      for (final k in keys)
-        RawDay(DateTime.fromMillisecondsSinceEpoch(k), buckets[k]!),
-    ];
+    return [for (final ts in tss) byTs[ts]!.build()];
   }
 
   /// The trustworthy live vitals — HRV (RMSSD over the real beats) and resting

@@ -446,6 +446,16 @@ class DayNutrition {
 // via [tableName], distinct from the app tables' drift-default names.
 
 /// Heart-rate sample. Room `hrSample`. PK (deviceId, ts).
+///
+/// The `ts` index is LOAD-BEARING for [LiveRepository], not an optimisation to be
+/// trimmed. The PK is (deviceId, ts), whose B-tree cannot serve a range on `ts`
+/// ALONE — so a per-day windowed read (`WHERE ts >= ? AND ts < ?`) degrades to a
+/// full table scan, making a whole-history walk O(days x totalRows), i.e.
+/// QUADRATIC: measured 218 ms per day-window at 30 days of history, which at 90
+/// days works out to ~58 s — worse than the single full-table read it replaced.
+/// With this index each window costs O(rows in that day), and the walk is linear.
+/// It is the same story for the other three streams the day-read touches.
+@TableIndex(name: 'ix_hr_sample_ts', columns: {#ts})
 class WhoopHrSamples extends Table {
   TextColumn get deviceId => text()();
   IntColumn get ts => integer()(); // unix seconds
@@ -502,6 +512,9 @@ class WhoopPpgRawSamples extends Table {
 }
 
 /// R-R interval. Room `rrInterval`. PK (deviceId, ts, rrMs) — many R-R per ts.
+/// `ts` index: see [WhoopHrSamples] — the PK's leading column is deviceId, so a
+/// bare `ts` range cannot use it.
+@TableIndex(name: 'ix_rr_interval_ts', columns: {#ts})
 class WhoopRrIntervals extends Table {
   TextColumn get deviceId => text()();
   IntColumn get ts => integer()();
@@ -593,7 +606,8 @@ class WhoopStepSamples extends Table {
 
 /// The strap's OWN @81 high-nibble band sleep_state (#175). Room
 /// `sleepStateSample`. `state` = 0 wake / 1 still / 2 asleep / 3 up. PK
-/// (deviceId, ts).
+/// (deviceId, ts). `ts` index: see [WhoopHrSamples].
+@TableIndex(name: 'ix_sleep_state_sample_ts', columns: {#ts})
 class WhoopSleepStateSamples extends Table {
   TextColumn get deviceId => text()();
   IntColumn get ts => integer()();
@@ -620,7 +634,8 @@ class WhoopRespSamples extends Table {
 }
 
 /// DSP-separated gravity/orientation vector (type-47, unit "g"). Room
-/// `gravitySample`. PK (deviceId, ts).
+/// `gravitySample`. PK (deviceId, ts). `ts` index: see [WhoopHrSamples].
+@TableIndex(name: 'ix_gravity_sample_ts', columns: {#ts})
 class WhoopGravitySamples extends Table {
   TextColumn get deviceId => text()();
   IntColumn get ts => integer()();
@@ -725,7 +740,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.e);
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -793,6 +808,36 @@ class AppDatabase extends _$AppDatabase {
           // the from<3 `whoopPpgRawSamples` create above.)
           if (from < 4) {
             await m.createTable(whoopRawFieldSamples);
+          }
+          // v4 → v5: index `ts` on the four sensor streams [LiveRepository] reads.
+          // Purely additive — indexes only. No table is created, altered, dropped or
+          // rewritten, and no column meaning changes, so every synced row survives an
+          // `adb install -r` exactly as before (the additive-forever invariant the
+          // migration tests pin).
+          //
+          // Why an index is the SCHEMA half of the day-read rewrite: `_buildDays` now
+          // reads ONE LOCAL DAY AT A TIME (`WHERE ts >= ? AND ts < ?`) instead of
+          // slurping whole tables. Without an index on `ts` that window is a full table
+          // scan — the PK (deviceId, ts) is useless for a range on `ts` alone — so the
+          // per-day walk would be O(days x totalRows). Measured, that is 218 ms per
+          // window at 30 days of history and ~58 s across a 90-day walk: strictly worse
+          // than the full read it replaces. The index is what makes the walk linear.
+          //
+          // IDEMPOTENT ON EVERY PRE-v5 PATH (the from<3 "duplicate column" scar above is
+          // the reason to spell this out): `Migrator.createTable` — which the `from < 2`
+          // and `from < 4` steps use — creates the TABLE ONLY. Indexes are separate
+          // schema entities, created solely by `createAll()` (i.e. onCreate, fresh
+          // installs). So no earlier step can have created these, on any path, and a
+          // genuine <v5 DB never has them.
+          if (from < 5) {
+            for (final ix in <Index>[
+              ixHrSampleTs,
+              ixRrIntervalTs,
+              ixGravitySampleTs,
+              ixSleepStateSampleTs,
+            ]) {
+              await m.createIndex(ix);
+            }
           }
         },
         beforeOpen: (details) async {
@@ -867,6 +912,44 @@ class AppDatabase extends _$AppDatabase {
   /// streams the live analytics are derived from. The live repository listens to
   /// this so scores re-derive as new syncs land (debounced by the caller). Other
   /// table writes (water/weight/nutrition) are intentionally excluded.
+  /// The (min, max) unix-second stamped on ANY of the four sensor streams
+  /// [LiveRepository] scores, or null when every one of them is empty.
+  ///
+  /// This is what lets the day-read walk local days without first reading a single
+  /// sensor row: it needs the span to iterate, not the rows. Each MIN/MAX resolves
+  /// against the `ts` index added in v5 (an index scan stops at the first/last key),
+  /// so the whole probe is O(1)-ish per table rather than four full scans.
+  Future<(int, int)?> whoopStreamTsRange() async {
+    final row = await customSelect(
+      'SELECT MIN(a) AS lo, MAX(b) AS hi FROM ('
+      '  SELECT MIN(ts) AS a, MAX(ts) AS b FROM hrSample'
+      '  UNION ALL SELECT MIN(ts), MAX(ts) FROM rrInterval'
+      '  UNION ALL SELECT MIN(ts), MAX(ts) FROM gravitySample'
+      '  UNION ALL SELECT MIN(ts), MAX(ts) FROM sleepStateSample'
+      ')',
+      readsFrom: {
+        whoopHrSamples,
+        whoopRrIntervals,
+        whoopGravitySamples,
+        whoopSleepStateSamples,
+      },
+    ).getSingle();
+    final lo = row.read<int?>('lo');
+    final hi = row.read<int?>('hi');
+    return (lo == null || hi == null) ? null : (lo, hi);
+  }
+
+  /// Whether ANY heart-rate row is synced. `LIMIT 1` — it asks whether one exists,
+  /// never how many there are, so it stops at the first row instead of counting
+  /// millions.
+  Future<bool> whoopHasAnyHr() async {
+    final rows = await customSelect(
+      'SELECT 1 FROM hrSample LIMIT 1',
+      readsFrom: {whoopHrSamples},
+    ).get();
+    return rows.isNotEmpty;
+  }
+
   Stream<void> watchWhoopStreams() => tableUpdates(TableUpdateQuery.allOf([
         TableUpdateQuery.onTable(whoopHrSamples),
         TableUpdateQuery.onTable(whoopRrIntervals),

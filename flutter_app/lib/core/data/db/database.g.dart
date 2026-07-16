@@ -16925,6 +16925,22 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $WhoopRawFieldSamplesTable whoopRawFieldSamples =
       $WhoopRawFieldSamplesTable(this);
   late final $SyncCursorsTable syncCursors = $SyncCursorsTable(this);
+  late final Index ixHrSampleTs = Index(
+    'ix_hr_sample_ts',
+    'CREATE INDEX ix_hr_sample_ts ON hrSample (ts)',
+  );
+  late final Index ixRrIntervalTs = Index(
+    'ix_rr_interval_ts',
+    'CREATE INDEX ix_rr_interval_ts ON rrInterval (ts)',
+  );
+  late final Index ixSleepStateSampleTs = Index(
+    'ix_sleep_state_sample_ts',
+    'CREATE INDEX ix_sleep_state_sample_ts ON sleepStateSample (ts)',
+  );
+  late final Index ixGravitySampleTs = Index(
+    'ix_gravity_sample_ts',
+    'CREATE INDEX ix_gravity_sample_ts ON gravitySample (ts)',
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -16967,6 +16983,10 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     whoopGravitySamples,
     whoopRawFieldSamples,
     syncCursors,
+    ixHrSampleTs,
+    ixRrIntervalTs,
+    ixSleepStateSampleTs,
+    ixGravitySampleTs,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
