@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:noop/core/analytics/sleep_stager.dart';
 
@@ -13,9 +15,15 @@ const _epoch = SleepStager.epochSec;
 const _t0 = 1750000000; // fixed epoch base — no clock reads, staging stays deterministic
 
 /// A 4-hour night (480 epochs) of asleep-flagged epochs at [restHr] bpm, carrying a block of
-/// [hotHr] bpm from [hotLo] to [hotHi] (relative epoch indices). Movement is the strap's |accel|
-/// in g: ~1 g of gravity on a motionless wrist, never ~0. [moved] makes the hot block a real
+/// [hotHr] bpm from [hotLo] to [hotHi] (relative epoch indices). [moved] makes the hot block a real
 /// excursion; otherwise the wrist is still for the whole night.
+///
+/// Movement carries NO fixed unit by contract — `detect` only ever measures it night-relatively, so
+/// a fixture may pick any scale. [mvFloor]/[mvMoved] name the two levels explicitly:
+///   * mvFloor 1.0 (default) = a raw |accel|-in-g trace, gravity included, still wrist ~1 g;
+///   * mvFloor 0.0           = what `DailyPipeline._buildEpochs` really hands over — gravity removed
+///                             and the day's quiet level subtracted, still wrist ~0, ~0.3 at peak.
+/// Both must stage identically; that is pinned below.
 ({List<int> ts, List<double?> hr, List<double> mv, List<bool> asleep}) _night({
   required bool moved,
   double restHr = 50,
@@ -23,6 +31,8 @@ const _t0 = 1750000000; // fixed epoch base — no clock reads, staging stays de
   int hotLo = 200,
   int hotHi = 260,
   List<int> seam = const <int>[],
+  double mvFloor = 1.0,
+  double mvMoved = 2.0,
 }) {
   const n = 480;
   final ts = <int>[];
@@ -36,8 +46,8 @@ const _t0 = 1750000000; // fixed epoch base — no clock reads, staging stays de
     hr.add(hot || inSeam ? hotHr : restHr);
     // A still wrist is not a CONSTANT wrist: carry a small deterministic wobble so the night has a
     // real (non-degenerate) motion scale for the MAD floor to calibrate against.
-    final quiet = 1.0 + 0.002 * (i % 5);
-    mv.add((moved && hot) || inSeam ? 2.0 : quiet);
+    final quiet = mvFloor + 0.002 * (i % 5);
+    mv.add((moved && hot) || inSeam ? mvMoved : quiet);
     asleep.add(!inSeam);
   }
   return (ts: ts, hr: hr, mv: mv, asleep: asleep);
@@ -58,7 +68,7 @@ SleepResult _detect(({List<int> ts, List<double?> hr, List<double> mv, List<bool
 void main() {
   group('motionQuiescent (night-relative motion floor, #462)', () {
     test('a still wrist reads quiescent for the whole night', () {
-      // |accel| ~1 g of gravity throughout: nothing moved, so every epoch is quiescent.
+      // A flat trace: nothing moved, so every epoch is quiescent.
       final q = SleepStager.motionQuiescent(List<double>.filled(100, 1.0));
       expect(q.every((x) => x), isTrue);
     });
@@ -71,7 +81,7 @@ void main() {
       expect(q.where((x) => x).length, 99);
     });
 
-    test('the floor is night-relative, not an absolute g bar', () {
+    test('the floor is night-relative, not an absolute bar', () {
       // Same night, decoded on a strap whose gravity scale reads ~8 g at rest. An absolute
       // threshold would call every epoch "moving"; the night's own median must absorb the scale.
       final mv = List<double>.filled(100, 8.0);
@@ -88,6 +98,164 @@ void main() {
 
     test('empty in, empty out', () {
       expect(SleepStager.motionQuiescent(const <double>[]), isEmpty);
+    });
+  });
+
+  group('motionExcursion (the clearly-moved tier)', () {
+    // The weak-cardiac wake branch needs "the wrist unmistakably moved", which is strictly stronger
+    // than "not quiescent". It used to be an absolute `mv >= 0.12 * 4` (0.48) bar — anchored to
+    // nothing, and DEAD on the real producer's gravity-removed, quiet-subtracted motion, which peaks
+    // around 0.3 across a whole day and sits at ~0 asleep. This tier is night-relative instead.
+
+    test('a still night has no excursions', () {
+      final mv = <double>[for (var i = 0; i < 100; i++) 1.0 + 0.002 * (i % 5)];
+      expect(SleepStager.motionExcursion(mv).any((x) => x), isFalse);
+    });
+
+    test('a real excursion is flagged and the quiet night around it is not', () {
+      final mv = <double>[for (var i = 0; i < 100; i++) 1.0 + 0.002 * (i % 5)];
+      mv[40] = 2.5; // the wearer turned over
+      final e = SleepStager.motionExcursion(mv);
+      expect(e[40], isTrue);
+      expect(e.where((x) => x).length, 1);
+    });
+
+    test('the tier fires at PRODUCTION scale, where the old absolute 0.48 bar was dead', () {
+      // Exactly the real producer's numbers: still ~0, a genuine excursion ~0.3. `0.3 >= 0.48` is
+      // false, so the old bar never fired here — the branch was unreachable code on live data.
+      final mv = <double>[for (var i = 0; i < 100; i++) 0.002 * (i % 5)];
+      mv[40] = 0.3;
+      expect(mv[40], lessThan(0.48), reason: 'the old absolute bar could not have fired');
+      expect(SleepStager.motionExcursion(mv)[40], isTrue);
+    });
+
+    test('the tier is night-relative, not an absolute bar', () {
+      // A strap whose gravity decode reads ~8 g at rest: the night's own median absorbs the scale.
+      final mv = <double>[for (var i = 0; i < 100; i++) 8.0 + 0.002 * (i % 5)];
+      mv[40] = 9.5;
+      expect(SleepStager.motionExcursion(mv)[40], isTrue);
+      expect(SleepStager.motionExcursion(mv).where((x) => x).length, 1);
+    });
+
+    test('an excursion is ALWAYS non-quiescent — the two tiers cannot contradict', () {
+      // Both read off the same median + MAD, the excursion gate being the wider one. Nothing may
+      // ever be "clearly moved" and "did not move" at once, whatever the trace.
+      for (final mv in <List<double>>[
+        <double>[for (var i = 0; i < 100; i++) 1.0 + 0.002 * (i % 5)],
+        <double>[for (var i = 0; i < 100; i++) 0.002 * (i % 5)]..[40] = 0.3,
+        <double>[for (var i = 0; i < 60; i++) i.toDouble()],
+        List<double>.filled(50, 2.0),
+        <double>[1, 1, 1, 1, 5, 1, 1, 900, 1, 1],
+      ]) {
+        final q = SleepStager.motionQuiescent(mv);
+        final e = SleepStager.motionExcursion(mv);
+        for (var i = 0; i < mv.length; i++) {
+          expect(e[i] && q[i], isFalse, reason: 'epoch $i cannot be both');
+        }
+      }
+    });
+
+    test('a zero-MAD trace flags nothing — this tier fails safe', () {
+      // No motion scale to measure against. Since this tier can only ever ADD wake, a degenerate
+      // trace must promote NOTHING rather than promote every off-floor epoch.
+      final mv = List<double>.filled(100, 1.0);
+      mv[40] = 9.9; // MAD is still 0: half the deviations are exactly 0
+      expect(SleepStager.motionExcursion(mv).any((x) => x), isFalse);
+    });
+
+    test('empty in, empty out', () {
+      expect(SleepStager.motionExcursion(const <double>[]), isEmpty);
+    });
+  });
+
+  group('movement scale invariance', () {
+    test('the same night stages identically at |accel| scale and at production scale', () {
+      // The stager measures movement ONLY night-relatively, so an affine shift of the whole trace —
+      // exactly what removing gravity is — must change nothing. This is the property that lets the
+      // producer and the stager disagree about units without a bug; the old absolute `_moveWake`
+      // broke it, which is why the wake branch died and the resp gate went blind.
+      final raw = _detect(_night(moved: true)); // still ~1.0 g, moved 2.0
+      final prod = _detect(_night(moved: true, mvFloor: 0.0, mvMoved: 1.0)); // gravity removed
+
+      expect(prod.awakeSec, raw.awakeSec);
+      expect(prod.asleepSec, raw.asleepSec);
+      expect(prod.deepSec, raw.deepSec);
+      expect(prod.remSec, raw.remSec);
+      expect(prod.lightSec, raw.lightSec);
+      expect(prod.disturbances, raw.disturbances);
+      expect(prod.hypnogram.length, raw.hypnogram.length);
+      for (var i = 0; i < raw.hypnogram.length; i++) {
+        expect(prod.hypnogram[i].stage, raw.hypnogram[i].stage);
+        expect(prod.hypnogram[i].startTs, raw.hypnogram[i].startTs);
+        expect(prod.hypnogram[i].durationSec, raw.hypnogram[i].durationSec);
+      }
+    });
+  });
+
+  group('weak cardiac evidence + an unmistakable excursion scores WAKE', () {
+    // The second wake branch: HR only just over baseline (well under the +12 bpm the first branch
+    // needs), but the wrist plainly moved. On production-scale movement the old absolute bar made
+    // this branch unreachable, so a mild-HR awakening with real thrashing was never called.
+
+    test('a mild HR lift WITH a real excursion is awake, at production scale', () {
+      final r = _detect(_night(
+        moved: true,
+        hotHr: 55, // +5 over baseline: under the +12 the strong-cardiac branch needs
+        mvFloor: 0.0,
+        mvMoved: 0.3, // a real excursion in the producer's units — and < the old 0.48 bar
+      ));
+      expect(r.awakeSec, 60 * _epoch, reason: 'the 60-epoch block moved and ran hot');
+      expect(r.disturbances, 1);
+    });
+
+    test('the SAME mild HR lift on a still wrist is not awake', () {
+      // Corroboration is real, not a blanket promotion: without the motion there is no wake.
+      final r = _detect(_night(moved: false, hotHr: 55, mvFloor: 0.0, mvMoved: 0.3));
+      expect(r.awakeSec, 0);
+      expect(r.disturbances, 0);
+      expect(r.asleepSec, r.inBedSec);
+    });
+  });
+
+  group('respiratory rate is never fabricated', () {
+    // `detect` cannot measure respiration and must not pretend to. It sees HR already averaged into
+    // 30 s epochs; adult respiration is 12–20 br/min (0.2–0.33 Hz) against a 0.033 Hz sample rate,
+    // i.e. ~15–20x above Nyquist. The estimator removed from here counted maxima of that epoch
+    // series and divided by minutes — at most 1.0 br/min — which its own clamp(8, 22) then pinned
+    // to EXACTLY 8.0. It could only ever emit null or that fabricated 8.0, and the 8.0 fed both the
+    // Recovery `resp` term and the resp baseline.
+
+    List<double?> _hrSeries(double Function(int i) f) => <double?>[for (var i = 0; i < 480; i++) f(i)];
+
+    SleepResult _detectHr(List<double?> hr) {
+      final r = SleepStager.detect(
+        epochTs: <int>[for (var i = 0; i < 480; i++) _t0 + i * _epoch],
+        epochHr: hr,
+        epochMovement: <double>[for (var i = 0; i < 480; i++) 0.002 * (i % 5)],
+        dayHrMin: 49,
+        epochAsleep: List<bool>.filled(480, true),
+      );
+      expect(r, isNotNull);
+      return r!;
+    }
+
+    test('no respiratory rate on the input that used to force the fabricated 8.0', () {
+      // The fastest oscillation the epoch grid can carry (a peak every 2 epochs) — the removed
+      // estimator's absolute best case, which returned exactly 8.0.
+      expect(_detectHr(_hrSeries((i) => 52 + (i.isEven ? 3.0 : -3.0))).respRate, isNull);
+    });
+
+    test('no respiratory rate from ordinary sleeping-HR wander either', () {
+      // A gentle drift across the night: the shape of real 30 s-mean HR, and the shape that used to
+      // trip the peak counter into emitting 8.0 on roughly one night in five.
+      expect(_detectHr(_hrSeries((i) => 50 + 2.0 * math.sin(i / 9.0))).respRate, isNull);
+    });
+
+    test('a REAL 15 br/min modulation is not recoverable — the grid aliased it away', () {
+      // 0.25 Hz sampled at 0.033 Hz. Pinned so nobody tries to "unlock" respRate by tuning a gate:
+      // the information is not in the input. OpenStrapEngine measures it off the raw RR intervals.
+      expect(_detectHr(_hrSeries((i) => 52 + 3.0 * math.sin(2 * math.pi * 0.25 * i * _epoch))).respRate,
+          isNull);
     });
   });
 
