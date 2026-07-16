@@ -605,8 +605,21 @@ class WhoopStepSamples extends Table {
 }
 
 /// The strap's OWN @81 high-nibble band sleep_state (#175). Room
-/// `sleepStateSample`. `state` = 0 wake / 1 still / 2 asleep / 3 up. PK
-/// (deviceId, ts). `ts` index: see [WhoopHrSamples].
+/// `sleepStateSample`. PK (deviceId, ts). `ts` index: see [WhoopHrSamples].
+///
+/// [state] is the RAW 2-bit code `(band81 >> 4) & 3`, stored verbatim. The bit
+/// extraction is pinned on real captured frames; what the codes MEAN is NOT. The
+/// "0 wake / 1 still / 2 asleep / 3 up" gloss this comment used to assert as fact is
+/// structural inference — the commit that introduced the channel said so itself, every
+/// real v18 frame in our suite reads 0, and no capture has ever shown a non-zero code.
+/// The sole consumer (`DailyPipeline._buildEpochs`) reads only `st != 0` and owns the
+/// full provenance note; read it before giving any code here a name.
+///
+/// This column is deliberately a RAW CHANNEL, and that is what makes storing it honest:
+/// it banks the strap's byte, not a verdict. It is also the cross-platform contract —
+/// `data_portability` maps `sleepStateSample` 1:1 onto Kotlin/Apple backups — so a
+/// meaning invented here would silently propagate into imported and exported data.
+/// A WHOOP 4.0 emits no sleep_state at all, so 4.0 rows are simply absent (never 0).
 @TableIndex(name: 'ix_sleep_state_sample_ts', columns: {#ts})
 class WhoopSleepStateSamples extends Table {
   TextColumn get deviceId => text()();
