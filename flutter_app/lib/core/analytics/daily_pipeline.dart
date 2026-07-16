@@ -521,6 +521,38 @@ class DailyPipeline {
     // state and how many of those were "asleep" (state != 0). Only used when the
     // day has ANY stateful sample — else the strap channel is absent and the
     // stager falls back to its HR heuristic.
+    //
+    // PROVENANCE OF `st != 0`, because it is weaker than it looks and this is the
+    // line that acts on it. `sleep_state` is the 2-bit high nibble of byte 81 of a
+    // WHOOP 5.0/MG v18 record — `(band81 >> 4) & 3`. The BIT EXTRACTION is solid
+    // (pinned on real captured frames). The MEANING of the codes is not. The
+    // "0 wake / 1 still / 2 asleep / 3 up" gloss repeated across this codebase is
+    // structural inference, and the commit that introduced the channel said so in
+    // as many words: "the meaning of the non-zero codes (still/asleep/up) is
+    // structural inference; every frame we hold reads 0 (wake)". Both real v18
+    // frames in our own suite still read 0. The RE repo has no grounding for it
+    // either — byte 81 falls in a region its protocol doc marks unidentified, no
+    // enum anywhere pairs those four names, and the official app never decodes
+    // these frames at all (it ships raw bytes; staging is server-side).
+    //
+    // So `st != 0` is a guess — but it is the CORROBORATED guess, and that is why
+    // it stands unchanged. Its one real anchor is e412e0ed's check against a
+    // phone-pulled DB, where days the strap logged sleep staged to within ~1 min of
+    // the band's own bouts. That both supports this reading and proves the field is
+    // non-trivially populated on a real strap. Every alternative is unanchored,
+    // including the tempting one: under the gloss above, code 3 ("up") counts as
+    // ASLEEP here, which reads as an obvious defect — but "fixing" it would trade a
+    // corroborated guess for an uncorroborated one on a code no capture has ever
+    // shown. Resolving it needs a night of real frames carrying non-zero codes, not
+    // a re-reading of the gloss. Until then this line is the honest one.
+    //
+    // Two consequences worth stating, both measured (`strap_sleep_state_channel_test.dart`):
+    //   * a WHOOP 4.0 emits NO sleep_state — the field is absent from its record
+    //     layouts entirely — so `asleep` is null for every 4.0 day and the stager's
+    //     HR fallback is what actually runs there;
+    //   * the field rides the SAME record as gravity (byte 81 vs 45), so a state
+    //     sample implies a motion sample. This channel can never speak about an
+    //     epoch that has a heart rate but no accel.
     final asleepCnt = List<int>.filled(nBins, 0);
     final stateCnt = List<int>.filled(nBins, 0);
     var anyState = false;
@@ -568,9 +600,24 @@ class DailyPipeline {
     final hr = <double?>[];
     final mv = <double?>[];
     // Per-epoch strap asleep verdict: majority of the bin's stateful samples say
-    // asleep. A bin with no state sample (a gap) counts as awake, so gaps can't
-    // extend a night. Null overall when the day has no strap sleep_state at all.
-    final asleep = anyState ? List<bool>.filled(nBins, false) : null;
+    // asleep. A bin with NO state sample stays NULL — the strap said nothing about
+    // it — and null is not a verdict: it is neither "asleep" nor "awake".
+    //
+    // This was `List<bool>.filled(nBins, false)`, i.e. a silent bin was recorded as
+    // the strap REPORTING AWAKE. That conflation is the same defect this file has
+    // now removed from two other channels (the 5.0 motion sentinel, then
+    // `movement: 1.0`): "no sample" encoded as a plausible reading of the sample.
+    // It survived here because the only consumer — the stager's `sleepy` window
+    // gate — asks `== true`, for which a null and a false are identical, so the
+    // encoding never cost a number. It cost something worse: it made the channel
+    // UNREADABLE. Two thirds of the `false`s on a coarsely-banked night are
+    // silence, not verdicts, and anything that read them as the strap's opinion
+    // would be reading mostly gaps. Null makes that impossible to get wrong, and
+    // costs nothing — see [SleepStager.detect]'s contract for what may be built on
+    // it, and what may not.
+    //
+    // Null overall when the day has no strap sleep_state at all (any WHOOP 4.0).
+    final asleep = anyState ? List<bool?>.filled(nBins, null) : null;
     for (var b = 0; b < nBins; b++) {
       ts.add(start + b * e);
       final hasHr = cntHr[b] > 0;
@@ -642,7 +689,12 @@ class _Epochs {
   final List<double?> mv;
 
   /// Per-epoch strap-reported asleep mask (#175), or null when this day carries
-  /// no strap sleep_state (the stager then uses its HR heuristic).
-  final List<bool>? asleep;
+  /// no strap sleep_state at all (the stager then uses its HR heuristic — this is
+  /// EVERY WHOOP 4.0, which never emits the field).
+  ///
+  /// Per entry: true = the strap reported asleep, false = the strap reported
+  /// awake, null = the strap reported NOTHING for that epoch. The third case is
+  /// not a corner: it is most of a coarsely-banked night.
+  final List<bool?>? asleep;
   _Epochs(this.ts, this.hr, this.mv, this.asleep);
 }

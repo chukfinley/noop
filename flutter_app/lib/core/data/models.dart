@@ -40,12 +40,29 @@ class SleepRecord {
   final int disturbances;
 
   /// True when this night was staged on motion too sparse to trust the staging
-  /// (#345, [SleepStager.motionSparseOver]) — a night with real holes in the
-  /// banked data. The stages, totals and [efficiency] are unchanged and remain
-  /// the engine's honest best read; this says only how far they can be believed,
-  /// so a confident 85–100 Rest is not claimed on data that cannot earn it.
-  /// Upstream's rule is the same — the engine emits the tier, no stage is faked,
-  /// and the UI surfaces it.
+  /// (#345, [SleepStager.motionSparseOver]). The stages, totals and [efficiency]
+  /// are unchanged and remain the engine's honest best read; this says only how
+  /// far they can be believed, so a confident 85–100 Rest is not claimed on data
+  /// that cannot earn it. Upstream's rule is the same — the engine emits the tier,
+  /// no stage is faked, and the UI surfaces it.
+  ///
+  /// This carries MORE weight than "a night with real holes in the banked data",
+  /// which is how it read while the producer still fabricated `movement: 1.0` for
+  /// every second with a heart rate and no accel — a default that made a coarsely
+  /// banked night indistinguishable from a densely banked one, so this flag could
+  /// not fire for the case #345 wrote it for. With the motion channel nullable
+  /// end-to-end it now also catches the classic WHOOP 4.0 profile (HR banked
+  /// densely, gravity coarsely), and on exactly those nights the staging behind it
+  /// is at its weakest: most epochs carry cardiac evidence with no motion to
+  /// corroborate it, so an ordinary overnight HR excursion scores awake unopposed.
+  /// Measured through the real producer, a still 7 h night whose dense twin scores
+  /// 0 disturbances scores 49 / 42 min WASO / eff 0.900 when gravity is banked
+  /// every 90 s — the count tracking the gravity SAMPLING PHASE, not the wearer.
+  /// The strap's own `sleep_state` cannot rescue those epochs (it rides the same
+  /// record as gravity, and a 4.0 never emits it at all — see
+  /// [SleepStager.detect]), so this flag is the only honest signal available for
+  /// them, and a consumer that ignores it will believe a disturbance count that
+  /// the banking rate chose.
   final bool motionSparse;
 
   const SleepRecord({

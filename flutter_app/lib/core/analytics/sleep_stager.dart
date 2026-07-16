@@ -205,13 +205,54 @@ class SleepStager {
   /// throughout). Unknown must stay unknown; there is no magnitude that can
   /// honestly stand in for a missing sample.
   ///
+  /// [epochAsleep] is the strap's OWN per-epoch verdict (#175), or null when this
+  /// day carries no strap `sleep_state` at all — which is EVERY WHOOP 4.0, whose
+  /// record layouts have no such field. Per entry: true = the strap reported
+  /// asleep, false = the strap reported awake, null = THE STRAP REPORTED NOTHING.
+  ///
+  /// It picks the WINDOW only ([sleepy] below); it does not stage. That looks like
+  /// waste — the strap told us per-second whether the wearer was awake, and inside
+  /// the window we re-derive that from HR and motion anyway — and the obvious
+  /// repair is to let the strap's verdict score the awake stage directly, which
+  /// would also spare a coarse-gravity night the cardiac-only wake calls the
+  /// comment block above describes. That repair was MEASURED, and it is not
+  /// available. Two independent reasons, either one sufficient:
+  ///
+  ///   * THE VERDICT IS ABSENT EXACTLY WHERE IT WOULD BE NEEDED. `sleep_state`
+  ///     rides byte 81 of the SAME per-second v18 record that carries gravity at
+  ///     bytes 45/49/53, and byte 81 is only readable on a record long enough to
+  ///     have already yielded byte 45. So a strap verdict IMPLIES a motion sample:
+  ///     the "HR present, motion absent" epochs — the only ones lacking
+  ///     corroboration — are precisely the epochs the strap said nothing about.
+  ///     There is no night on which this channel can speak to them.
+  ///   * THE NIGHT IN QUESTION HAS NO CHANNEL AT ALL. The coarse-gravity offload
+  ///     is a WHOOP 4.0 profile, and a 4.0 never emits `sleep_state`, so
+  ///     [epochAsleep] is null there. Measured: that night scores an identical
+  ///     49 disturbances / 42 min WASO / eff 0.900 with the channel absent.
+  ///
+  /// Staging on it anyway means staging on its nulls, and a null is silence. Fed
+  /// through the real producer with the strap channel banked as the strap actually
+  /// banks it (state alongside gravity), letting it drive the awake stage turned a
+  /// still 7 h night the strap called asleep throughout into 279 disturbances /
+  /// 279 min WASO / eff 0.334 — every silent epoch read as an awakening. It scores
+  /// a clean 0 only if the channel is fed denser than gravity, which no strap does.
+  /// That is not a fix for the 49; it is the same class of defect at five times the
+  /// size — the third channel on which "no sample" would have been spent as a
+  /// reading, after the 5.0 motion sentinel and `movement: 1.0`. Absence of a
+  /// verdict is not a verdict, which is the rule both of those arrived at too.
+  ///
+  /// Note also what this channel is NOT: `sleep_state` is a 2-bit code, so even
+  /// where it speaks it cannot carry light/deep/REM, and no stage may be sourced
+  /// from it. What its non-zero codes MEAN is unproven — see the provenance note
+  /// in `DailyPipeline._buildEpochs`, which owns the `st != 0` reading.
+  ///
   /// Returns null if no plausible sleep window (>= ~2h) is found.
   static SleepResult? detect({
     required List<int> epochTs,
     required List<double?> epochHr,
     required List<double?> epochMovement,
     double? dayHrMin,
-    List<bool>? epochAsleep,
+    List<bool?>? epochAsleep,
   }) {
     final n = epochTs.length;
     if (n < _minWindowEpochs) return null;
@@ -230,14 +271,22 @@ class SleepStager {
     // ── 1. Find the longest sleep run, tolerating short gaps.
     // GROUND-TRUTH FIRST: when the strap's own per-second sleep_state is available
     // ([epochAsleep] non-null, #175), an epoch is "sleepy" exactly when the band
-    // says so — this matches WHOOP's official app and, crucially, reports NO sleep
-    // window on a day the wearer never slept (an awake-but-resting stretch in bed
-    // no longer gets mis-detected as a night). Only when the band gives us nothing
-    // (e.g. the bundled asset) do we fall back to the HR-driven heuristic: an epoch
+    // AFFIRMATIVELY says so — this matches WHOOP's official app and, crucially,
+    // reports NO sleep window on a day the wearer never slept (an awake-but-resting
+    // stretch in bed no longer gets mis-detected as a night). Only when the band
+    // gives us nothing at all do we fall back to the HR-driven heuristic: an epoch
     // is sleepy when it HAS a heart rate that sits near the day's floor. Movement is
     // used only for within-window awake/deep/REM staging below.
+    //
+    // `== true` is what makes an epoch the strap said NOTHING about non-sleepy
+    // WITHOUT it counting as the strap reporting awake. Both are non-sleepy here,
+    // so the window is unchanged either way — a silent epoch has never been able to
+    // extend a night and still cannot. The distinction is kept because the two are
+    // different evidence, and the moment anything downstream treats them alike it
+    // manufactures awakenings out of gaps (see this method's [epochAsleep] doc for
+    // the measurement).
     final sleepy = List<bool>.generate(n, (i) {
-      if (epochAsleep != null) return epochAsleep[i];
+      if (epochAsleep != null) return epochAsleep[i] == true;
       final h = epochHr[i];
       return h != null && h <= hrFloor + _hrSleepMargin;
     });
