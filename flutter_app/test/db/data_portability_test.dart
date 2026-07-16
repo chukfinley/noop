@@ -1,5 +1,7 @@
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -117,6 +119,81 @@ void main() {
     final summary = await DataPortability(fresh).importFile(bak);
     expect(summary.rowsByTable['hrSample'], 840);
     expect((await fresh.select(fresh.whoopSleepStateSamples).get()).length, 840);
+  });
+
+  // #468 (#458 upstream): a live-BLE install banks its history through the BLE
+  // insert path — it has NEVER imported a WHOOP file. Upstream's CSV export read
+  // only the imported source id, so such an install exported an empty zip while
+  // the app displayed months of data. Our export is `VACUUM main INTO` (the whole
+  // file, provenance-agnostic), so the literal bug cannot occur — this pins that:
+  // a store seeded ONLY through the BLE path must round-trip its banked history.
+  // Every other export test above seeds via importFromSqlite, so this live-only
+  // path was untested.
+  test('a live-BLE-only store (never imported) exports its banked history', () async {
+    final dir = Directory.systemTemp.createTempSync('nooplivebak');
+    addTearDown(() => dir.deleteSync(recursive: true));
+
+    final liveFile = File('${dir.path}/live.sqlite');
+    final live = AppDatabase.forTesting(NativeDatabase(liveFile));
+    addTearDown(live.close);
+
+    // Bank a night the way the BLE Backfiller does — the typed insert API, no
+    // import anywhere in sight.
+    const dev = 'whoop-live-uuid';
+    final base = DateTime(2026, 5, 2).millisecondsSinceEpoch ~/ 1000;
+    final hr = <WhoopHrSamplesCompanion>[];
+    final rr = <WhoopRrIntervalsCompanion>[];
+    final grav = <WhoopGravitySamplesCompanion>[];
+    final sleep = <WhoopSleepStateSamplesCompanion>[];
+    for (var t = base + 1800; t < base + 7 * 3600 + 1800; t += 30) {
+      final bpm = 50 + (t ~/ 30) % 4;
+      hr.add(WhoopHrSamplesCompanion.insert(deviceId: dev, ts: t, bpm: bpm));
+      rr.add(WhoopRrIntervalsCompanion.insert(
+          deviceId: dev, ts: t, rrMs: (60000 / bpm).round()));
+      grav.add(WhoopGravitySamplesCompanion.insert(
+          deviceId: dev, ts: t, x: 0, y: 0, z: 1));
+      sleep.add(
+          WhoopSleepStateSamplesCompanion.insert(deviceId: dev, ts: t, state: 2));
+    }
+    await live.insertWhoopHr(hr);
+    await live.insertWhoopRr(rr);
+    await live.insertWhoopGravity(grav);
+    await live.insertWhoopSleepState(sleep);
+    // The two live-only raw tables: NO Kotlin backup can ever carry these — they
+    // exist solely because this install synced a strap over BLE.
+    await live.insertWhoopPpgRaw([
+      WhoopPpgRawSamplesCompanion.insert(
+          deviceId: dev, ts: base + 1800, sampleCount: 3, samples: Uint8List.fromList([1, 0, 2, 0, 3, 0])),
+    ]);
+    await live.insertWhoopRawFields([
+      WhoopRawFieldSamplesCompanion.insert(
+          deviceId: dev, ts: base + 1800, key: 'status_word', intValue: const Value(42)),
+    ]);
+
+    final bak = '${dir.path}/live.noopbak';
+    await DataPortability(live).exportToNoopbak(bak);
+    expect(File(bak).existsSync(), isTrue);
+
+    // Re-import into a fresh install: the banked history must survive in FULL —
+    // an export that drops a live-only table is the same class of defect as #458
+    // (the live-BLE install's own data going missing on the way out).
+    final fresh = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(fresh.close);
+    final summary = await DataPortability(fresh).importFile(bak);
+
+    expect(summary.recognised, isTrue, reason: 'a live-BLE backup is a NOOP backup');
+    expect(summary.rowsByTable['hrSample'], 840);
+    expect((await fresh.select(fresh.whoopSleepStateSamples).get()).length, 840);
+    expect((await fresh.select(fresh.whoopRrIntervals).get()).length, 840);
+    expect((await fresh.select(fresh.whoopPpgRawSamples).get()).length, 1,
+        reason: 'the v26 PPG waveform is live-BLE-only — dropping it on restore '
+            'silently loses data no other source can re-supply');
+    expect((await fresh.select(fresh.whoopRawFieldSamples).get()).length, 1,
+        reason: 'the v18 long-format raw fields are live-BLE-only');
+
+    // And the restored install scores the night, exactly as the source did.
+    final repo = await LiveRepository.load(fresh);
+    expect(repo.days, isNotEmpty);
   });
 
   test('a non-NOOP file is rejected with a clear message, store untouched', () async {
