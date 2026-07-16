@@ -199,8 +199,12 @@ class _SampleBuilder {
         rr1: rr.isNotEmpty ? rr[0] : 0,
         rr2: rr.length > 1 ? rr[1] : 0,
         rr3: rr.length > 2 ? rr[2] : 0,
-        // Default to the 1 g resting magnitude (≈ still) for a second with HR but
-        // no accel sample, so it never reads as spurious motion.
-        movement: mv ?? 1.0,
+        // A second with no accel sample carries NO movement — never the 1 g
+        // resting magnitude it used to default to. HR and gravity are merged onto
+        // one row here but are not sampled together (a 4.0 offload banks HR
+        // densely and gravity coarsely), so that default fabricated perfect
+        // stillness for most seconds of a real night and fed it to the guards
+        // that decide whether the wearer woke up. See [RawSample.movement].
+        movement: mv,
       );
 }

@@ -139,6 +139,27 @@ class SleepStager {
   // The dead-band between them is deliberate: an epoch that is neither plainly
   // still nor plainly moving corroborates nothing either way.
   //
+  // An epoch with NO motion sample sits in that same dead band, and the wake
+  // branches read it accordingly: it never satisfies `moved` (so it cannot
+  // promote a wake), and it never satisfies `still` (so it cannot veto one).
+  // Cardiac evidence then decides it alone, exactly as it did before #462. That
+  // is the honest cost of not knowing, and it is a REAL cost: on a coarse-gravity
+  // 4.0 offload, where most epochs carry a heart rate and no accel, an ordinary
+  // overnight HR excursion over `_hrWakeMargin` now scores awake with nothing to
+  // corroborate it — measured at 49 disturbances on a 7 h still night whose dense
+  // twin scores 0. Such nights are exactly the ones `motionSparseOver` flags, and
+  // flagging them is the only honest response available here.
+  //
+  // The tempting alternative — require KNOWN non-stillness for the strong-cardiac
+  // branch, so a sample-less epoch cannot be scored awake at all — was measured
+  // and REJECTED. It does not buy accuracy, it buys silence: it reproduces the
+  // fabricated-stillness bug's numbers exactly (a real 15-min waking at 78 bpm
+  // that the strap banked no accel for goes back to 0 disturbances and 1.000
+  // efficiency; a real waking on a 90 s-gravity night goes back to a 10-segment
+  // comb). "No phantom disturbances" would then just mean "no disturbances",
+  // which is how a wearer stops being told they woke up. Absence of evidence may
+  // never be spent as evidence of stillness — see [RawSample.movement].
+  //
   // These replace a single absolute `_moveWake = 0.12` "g" bar that was anchored
   // to nothing and was wrong in BOTH directions on the real producer's data
   // (gravity-removed, quiet-subtracted motion — ~0 at rest, ~0.3 peak across a
@@ -489,16 +510,16 @@ class SleepStager {
   ///     long dropouts keep a small median gap while still hiding run-breaking
   ///     holes. A median would call that night dense.
   ///
-  /// WHAT THIS DOES NOT CATCH, and why it is still worth having: our
-  /// `LiveRepository` merges HR and gravity onto one per-second row and defaults a
-  /// row with HR but no accel to `movement: 1.0` (the resting magnitude). So a
-  /// second that never carried a gravity sample is INDISTINGUISHABLE here from a
-  /// second whose wrist was genuinely still — the sparsity is erased upstream of
-  /// this stager, and the classic WHOOP 4.0 case (dense HR, coarse gravity) will
-  /// read as fully covered and NOT trip this guard. What this does catch is a
-  /// night with real holes in the banked data, which is producer-fed and, until
-  /// that default is fixed, the honest half of the signal. Making
-  /// `RawSample.movement` nullable end-to-end is what would close the other half.
+  /// This DOES now catch the classic WHOOP 4.0 case (dense HR, coarse gravity),
+  /// and for most of this guard's life it did not. `LiveRepository` merges HR and
+  /// gravity onto one per-second row, and it used to default a row with HR but no
+  /// accel to `movement: 1.0` — the resting magnitude — which made a second that
+  /// never carried a gravity sample INDISTINGUISHABLE from a second whose wrist
+  /// was genuinely still. The sparsity was erased upstream of this stager, so a
+  /// 4.0 night read as fully covered and this guard could never fire for the very
+  /// case it was written for (measured: 90 s and 120 s gravity nights scoring
+  /// identically to a 30 s one). `RawSample.movement` is nullable end-to-end now,
+  /// so the coverage this counts is the coverage the strap actually banked.
   ///
   /// An empty window is not sparse (there is no staging to doubt).
   /// Pure + deterministic.

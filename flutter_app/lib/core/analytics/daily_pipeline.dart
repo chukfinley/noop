@@ -532,9 +532,18 @@ class DailyPipeline {
         cntHr[b]++;
       }
       // `movement` is |accel| in g (~1.0 at rest, gravity). Motion is the
-      // deviation from that 1 g resting magnitude, so a still wrist ≈ 0.
-      sumMv[b] += (r.movement - 1.0).abs();
-      cntMv[b]++;
+      // deviation from that 1 g resting magnitude, so a still wrist ≈ 0. A
+      // second with NO accel sample contributes NOTHING — it must not be averaged
+      // in, and it must not make the bin look sampled. Counting such seconds (as
+      // this did, back when the producer handed over a fabricated 1.0 for them)
+      // corrupted the bin twice over: it diluted whatever real motion the bin did
+      // carry toward zero, and it made a bin of pure fabrication indistinguishable
+      // from a genuinely still one. See [RawSample.movement].
+      final m = r.movement;
+      if (m != null) {
+        sumMv[b] += (m - 1.0).abs();
+        cntMv[b]++;
+      }
       final st = r.sleepState;
       if (st != null) {
         anyState = true;
