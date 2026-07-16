@@ -58,9 +58,18 @@ Future<void> main() async {
 
   // Auto-connect the moment Bluetooth is switched ON (by any means — the in-app
   // "Turn on" banner, Android quick-settings, …): if a strap is remembered,
-  // reconnect and offload. connectRemembered() runs a scan then a direct
-  // reconnect, so a sync begins a few seconds after the adapter powers on — the
-  // "turn on Bluetooth → strap connects → sync starts" behaviour the user wants.
+  // reconnect and offload, so a sync begins a few seconds after the adapter
+  // powers on — the "turn on Bluetooth → strap connects → sync starts" behaviour
+  // the user wants.
+  //
+  // The `pairedStrapProvider != null` guard is LOAD-BEARING, not a fast path.
+  // connectRemembered() reconnects a REMEMBERED strap and otherwise refuses
+  // ([WhoopBleClient.resolveAutoConnect] never adopts an arbitrary advertiser —
+  // it once did, which made an unattended tick pair with whichever band was
+  // nearby). This listener fires with no user present, so it must never be the
+  // thing that FIRST pairs a strap: pairing is an explicit pick, via onboarding's
+  // "Find your strap" or Settings → Scan for straps.
+  //
   // Fires only on the false→true transition, and only on a real BLE platform.
   container.listen<AsyncValue<bool>>(bleAdapterOnProvider, (prev, next) {
     final wasOn = prev?.valueOrNull ?? false;
