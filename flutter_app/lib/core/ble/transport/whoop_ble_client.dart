@@ -48,6 +48,7 @@ import '../protocol/parsed_frame.dart';
 import '../protocol/streams.dart';
 import '../protocol/whoop5_config.dart';
 import '../sync/backfiller.dart';
+import '../sync/establish_timeout_tracker.dart';
 import '../sync/raw_archive.dart';
 import '../sync/reconnect_backoff.dart';
 import '../sync/stream_persistence.dart';
@@ -263,6 +264,33 @@ class WhoopBleClient {
   /// Spacing between the 15 SET_CONFIG R22 enable writes (Kotlin uses ~80ms).
   static const Duration r22FlagSpacing = Duration(milliseconds: 80);
 
+  /// How long `device.connect()` may run before flutter_blue_plus aborts it ITSELF.
+  ///
+  /// This is a BACKSTOP, not the real timeout — and the margin is the whole #147 feature's headroom.
+  /// Android's GATT stack gives up on an unanswered connection request at ~30s and reports status
+  /// 147, which is the signal [_establishTimeout] exists to count. If fbp's own timer fires FIRST it
+  /// throws its own `FlutterBluePlusException` (platform `fbp`, code `FbpErrorCode.timeout` = 1) and
+  /// the 147 never arrives — the tracker would then never see the very thing it detects.
+  ///
+  /// 35s (the previous value) left only ~5s of margin over a nominal 30s, which the stack's own
+  /// scheduling jitter can eat. 60s doubles the Android budget so the platform status always wins the
+  /// race and fbp's timer degrades to what it should be: a last-resort unwedge for a stack that never
+  /// reports at all. The cost is bounded and only paid in that rare silent case — one retry waits up
+  /// to 25s longer — and the backoff reconnect is unchanged either way.
+  static const Duration connectTimeout = Duration(seconds: 60);
+
+  /// The honest recovery guidance for a SUSTAINED run of status-147 establishment timeouts: the strap
+  /// is advertising but never answering, which is a wedged radio on the STRAP or PHONE side.
+  ///
+  /// Deliberately NOT re-pair steps. A 147 link never reached a connected state, so no pairing ever
+  /// ran and no bond is at fault — telling the user to unpair would cost them a needless re-pair that
+  /// cannot fix this. These three are the fixes that actually do: kick the strap's radio via its
+  /// charger, restart the phone's Bluetooth stack, or restart the phone.
+  static const String establishTimeoutHint =
+      'Your strap is advertising but not answering. Put it on its charger for a few '
+      'seconds, then toggle Bluetooth off and on. If it keeps happening, restart your '
+      'phone. NOOP keeps retrying in the background.';
+
   /// Flush the live-frame buffer at least this often (Kotlin FLUSH_MAX_INTERVAL_MS ≈ 5s).
   static const Duration liveFlushInterval = Duration(seconds: 5);
 
@@ -385,6 +413,20 @@ class WhoopBleClient {
   @visibleForTesting
   void debugResetForUserAction() => _resetBondStateForUserAction();
 
+  /// Drive the REAL connect-failure classifier with the exception `device.connect()` would have
+  /// thrown, so the #147 predicate + guidance are reachable radio-free.
+  @visibleForTesting
+  void debugRecordConnectFailure(Object e) => _recordConnectFailure(e);
+
+  /// The current consecutive status-147 establishment-timeout streak.
+  @visibleForTesting
+  int get debugEstablishTimeoutStreak => _establishTimeout.consecutiveTimeouts;
+
+  /// Drive the REAL `_onConnected` streak reset without a radio (the full `_onConnected` needs a
+  /// device; this pins only the reset half the tracker cares about).
+  @visibleForTesting
+  void debugResetEstablishTimeout() => _establishTimeout.reset();
+
   @visibleForTesting
   int get debugReconnectAttempt => _reconnectAttempt;
 
@@ -472,6 +514,13 @@ class WhoopBleClient {
   bool _autoReconnectPausedForBondLoop = false;
   /// When the bond-loop pause last tripped (epoch ms), feeding [shouldSalvageProbe]; null when clear.
   int? _bondLoopPausedAtMs;
+
+  // ── connection-establishment timeout (#147 guidance; Android only, inert elsewhere) ─────────
+  /// Counts CONSECUTIVE failed connects that were GATT-status-147 establishment timeouts — a strap
+  /// that advertises but never answers. Fed from [_recordConnectFailure], reset on a real connect, a
+  /// user teardown and [dispose]. Deliberately NOT part of the bond stack: 147 means the link never
+  /// came up, so no bond logic ever ran and the re-pair guides do not apply.
+  final EstablishTimeoutTracker _establishTimeout = EstablishTimeoutTracker();
 
   Timer? _scanFallbackTimer;
   /// #982 scan give-up: bounds every scan so a scan that never sees a matching strap can't wedge the
@@ -867,6 +916,9 @@ class WhoopBleClient {
     _autoReconnectPausedForBondLoop = false;
     _bondLoopPausedAtMs = null;
     _reconnectAttempt = 0;
+    // A user teardown / fresh tap also re-arms the #147 streak: the guidance the user just acted on
+    // (or dismissed by tapping Connect) must not re-assert itself off a stale pre-teardown streak.
+    _establishTimeout.reset();
   }
 
   // ============================================================================================
@@ -1041,6 +1093,7 @@ class WhoopBleClient {
   /// Release all resources. Safe to call multiple times.
   Future<void> dispose() async {
     _intentionalDisconnect = true;
+    _establishTimeout.reset(); // the strap is released — the streak dies with the client
     _cancelTimers();
     await _teardownConnection();
     await _connController.close();
@@ -1220,11 +1273,41 @@ class WhoopBleClient {
       // License.nonprofit: NOOP is an open-source app with no Pro tier (see the flutter_blue_plus 2.x
       // source-available license). A commercial release would need the paid license instead.
       await device.connect(
-          license: License.nonprofit, timeout: const Duration(seconds: 35));
+          license: License.nonprofit, timeout: connectTimeout);
     } catch (e) {
       _log('connect() failed: $e');
+      _recordConnectFailure(e);
       _onDisconnected();
     }
+  }
+
+  /// Classify a FAILED connect and feed [_establishTimeout], surfacing the #147 recovery guidance on a
+  /// sustained streak. The predicate is deliberately THREE-part:
+  ///
+  ///  • `is FlutterBluePlusException` — the only exception type carrying a status code at all;
+  ///  • `.platform == ErrorPlatform.android` — LOAD-BEARING. flutter_blue_plus reuses this same
+  ///    exception type for its OWN errors, whose `.code` is an `FbpErrorCode` enum INDEX, not a GATT
+  ///    status (`FbpErrorCode.timeout` = 1, etc). Without the platform check an fbp-origin code would
+  ///    be misread as a GATT status the Android stack never sent;
+  ///  • `.code == 147` — the Android 14+ fine-grained establishment-timeout status.
+  ///
+  /// Any other failure breaks the streak inside the tracker (a different status means the strap is at
+  /// least answering). We inform and NEVER pause: the backoff reconnect in [_onDisconnected] runs
+  /// unchanged, because a wedged radio can self-heal and a pause would strand a strap that recovered.
+  void _recordConnectFailure(Object e) {
+    final establishTimedOut = e is FlutterBluePlusException &&
+        e.platform == ErrorPlatform.android &&
+        e.code == EstablishTimeoutTracker.gattConnEstablishTimeout;
+    if (!_establishTimeout.recordFailedConnect(
+        establishTimedOut: establishTimedOut)) {
+      return;
+    }
+    // Re-asserted on EVERY over-threshold timeout (not one-shot like the bond guides): a
+    // user-initiated Connect overwrites lastError with its own progress text, so the hint has to be
+    // able to come back. Idempotent — the same string every time.
+    _log('connection-establishment timeout streak '
+        '(${_establishTimeout.consecutiveTimeouts}× status 147) — surfacing recovery guidance');
+    lastError = establishTimeoutHint;
   }
 
   Future<void> _onConnected(BluetoothDevice device) async {
@@ -1233,6 +1316,7 @@ class WhoopBleClient {
     _didBond = false; // each fresh connection starts unbonded until proven (drives the loop detector)
     _bondedAtMs = null;
     _reconnectAttempt = 0; // a real connect clears the backoff (Kotlin resetReconnectBackoff)
+    _establishTimeout.reset(); // the strap answered — any 147 suspicion must accumulate afresh
     _reassembler.reset();
     _log('Connected — discovering services');
 

@@ -105,6 +105,8 @@ class Prefs {
   static const _kLastKnownBatteryPct = 'last_known_battery_pct';
   static const _kLastKnownBatteryAt = 'last_known_battery_at_ms';
   static const _kLastKnownCharging = 'last_known_charging';
+  static const _kPowerSaving = 'power_saving_enabled';
+  static const _kPowerSavingPct = 'power_saving_threshold_pct';
 
   final FlutterSecureStorage _store = const FlutterSecureStorage();
 
@@ -221,6 +223,20 @@ class Prefs {
   int? lastKnownBatteryAtMs;
   bool? lastKnownCharging;
 
+  /// Power saving (strap-battery adaptive, `core/ble/sync/power_saving_policy.dart`).
+  /// OFF by default → the whole feature ships dormant and the background sync keeps its
+  /// normal 15-min cadence, byte-for-byte today's behaviour. [powerSavingThresholdPct]
+  /// is the STRAP-battery percentage the user picks for the levers to engage at; the
+  /// policy clamps it into its own 10–30 picker range, so a corrupt/legacy stored value
+  /// can never widen the lever beyond what the UI offers.
+  ///
+  /// Deliberately only TWO fields: the policy's `releaseContinuousHrv` sub-option has no
+  /// stream to release in this port yet (the Flutter client never arms an always-on
+  /// continuous-HRV capture — see the power-saving notes in the background worker), so
+  /// persisting a preference for it would be a dead key behind a dead toggle.
+  bool powerSavingEnabled = false;
+  int powerSavingThresholdPct = 20;
+
   /// Reconstruct the immutable [LastKnownBattery] from the persisted fields, or null
   /// when no real reading has ever been banked (→ the UI honestly shows "—").
   LastKnownBattery? get lastKnownBattery =>
@@ -301,6 +317,9 @@ class Prefs {
       lastKnownBatteryAtMs = int.tryParse(all[_kLastKnownBatteryAt] ?? '');
       final lkc = all[_kLastKnownCharging];
       lastKnownCharging = (lkc == null || lkc.isEmpty) ? null : lkc == 'true';
+      powerSavingEnabled = all[_kPowerSaving] == 'true';
+      powerSavingThresholdPct =
+          int.tryParse(all[_kPowerSavingPct] ?? '') ?? powerSavingThresholdPct;
     } catch (e) {
       debugPrint('Prefs.load failed, using defaults: $e');
     }
@@ -483,6 +502,19 @@ class Prefs {
     await _write(_kLastSyncAt, atMs.toString());
     await _write(_kLastSyncedRecordTs, newestRecordTsMs?.toString() ?? '');
     await _write(_kLastSyncRecordCount, recordCount?.toString() ?? '');
+  }
+
+  /// Persist the power-saving master arm (an intentional user toggle).
+  Future<void> setPowerSavingEnabled(bool value) async {
+    powerSavingEnabled = value;
+    await _write(_kPowerSaving, value ? 'true' : 'false');
+  }
+
+  /// Persist the strap-battery percentage the power-saving levers engage at. Stored
+  /// verbatim; the policy clamps it to its own picker range when it is read.
+  Future<void> setPowerSavingThresholdPct(int pct) async {
+    powerSavingThresholdPct = pct;
+    await _write(_kPowerSavingPct, pct.toString());
   }
 
   /// Persist (or clear, when passed null/empty) the manual device-name override.

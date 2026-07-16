@@ -52,6 +52,7 @@ import 'package:workmanager/workmanager.dart';
 
 import '../../data/db/database.dart';
 import '../../state/prefs.dart';
+import '../sync/power_saving_policy.dart';
 import '../sync/stream_persistence.dart';
 import '../transport/whoop_ble_client.dart';
 import '../transport/whoop_providers.dart' show readPairedStrap;
@@ -124,6 +125,23 @@ Future<bool> runHeadlessWhoopSync() async {
   // we are, so a null value proceeds. Only an explicit `false` blocks the run.
   if (Prefs.instance.backgroundSyncEnabled == false) return true;
 
+  // ── Power saving: skip this tick while the STRAP's battery is low (#477) ──────────────────
+  // Checked BEFORE the DB is opened — the whole point is to not spend the wakeup. The strap keeps
+  // banking to its own flash meanwhile, so a skipped tick delays data into a larger batch on the
+  // next one; nothing is lost. Fail-open in every ambiguous case (see the predicate).
+  final lastKnown = Prefs.instance.lastKnownBattery;
+  if (powerSavingShouldSkipTick(
+    policy: powerSavingPolicyFromPrefs(),
+    batteryFraction: lastKnown?.pct,
+    charging: lastKnown?.charging,
+    lastSyncAtMs: Prefs.instance.lastSyncAtMs,
+    nowMs: DateTime.now().millisecondsSinceEpoch,
+  )) {
+    debugPrint('WorkManager WHOOP sync: power saving — strap battery low, '
+        'stretched cadence has not elapsed; skipping');
+    return true;
+  }
+
   // Own DB handle on the SAME on-device sqlite file the app uses. Safe here because either the app
   // is dead (sole owner) or the heartbeat guard below makes us bail before any heavy work.
   final db = AppDatabase();
@@ -176,6 +194,58 @@ bool workerShouldYield({
   final ageSec = nowUnix - beatUnix;
   if (ageSec < 0) return true; // future/skewed beat → cannot prove stale → assume alive
   return ageSec < kHeartbeatStale.inSeconds; // fresh → app owns BLE; stale → app dead
+}
+
+/// The power-saving policy the user has configured, rebuilt from [Prefs] in whichever isolate asks.
+///
+/// The `releaseContinuousHrv` sub-option is deliberately left at its `false` default: this port has
+/// no always-on continuous-HRV stream to release (see [powerSavingShouldSkipTick]'s note), so there
+/// is no preference for it to read. Dormant is the honest state, not a stub.
+PowerSavingPolicy powerSavingPolicyFromPrefs() => PowerSavingPolicy(
+      enabled: Prefs.instance.powerSavingEnabled,
+      thresholdPct: Prefs.instance.powerSavingThresholdPct,
+    );
+
+/// Pure decision: should THIS WorkManager tick skip because power saving stretched the history-sync
+/// cadence past it? Side-effect free (no DB, no radio, no clock read) so the whole truth table is
+/// unit-testable — the [workerShouldYield] idiom.
+///
+/// ## Why the stretch is a tick GATE, not a re-registered frequency
+/// WorkManager's periodic minimum IS 15 minutes, which is exactly the policy's normal cadence, so the
+/// registered job already ticks at the finest granularity the OS offers. Re-registering it at 45 min
+/// whenever the battery crosses the threshold would mean `ExistingPeriodicWorkPolicy.update` churn on
+/// a battery stream — resetting the job's timing on every flip and fighting the scheduler. Instead the
+/// job keeps its single stable 15-min tick and this gate drops 2 of every 3 while engaged, which is
+/// the same 45-min effective cadence with none of the churn. It also works in the regime that matters:
+/// the app is KILLED, so there is no main isolate to notice a battery change and re-register anything.
+///
+/// ## Fail-open by construction
+/// Every ambiguity syncs rather than skips — a missed sync delays data, and this lever's whole
+/// contract is that it never loses any:
+///   • policy not engaged (off / charging / battery unknown / above threshold) → the interval is the
+///     normal 15 min, which equals the tick period, so we NEVER gate. Today's behaviour byte-for-byte,
+///     and the tick's own jitter can never turn a 15-min cadence into an accidental 30.
+///   • [lastSyncAtMs] == null (never synced) → never hold back the very first sync.
+///   • a FUTURE last-sync stamp (clock skew / DST) → cannot prove the interval hasn't elapsed → sync.
+///
+/// [batteryFraction] / [charging] come from the last-known STRAP battery snapshot ([Prefs.lastKnownBattery]),
+/// which the foreground provider banks on every reading and [_runOneOffload] re-banks after each
+/// headless run — so the killed-app regime keeps a real number here rather than going stale.
+bool powerSavingShouldSkipTick({
+  required PowerSavingPolicy policy,
+  required double? batteryFraction,
+  required bool? charging,
+  required int? lastSyncAtMs,
+  required int nowMs,
+}) {
+  final intervalMs =
+      policy.syncIntervalMs(batteryFraction: batteryFraction, charging: charging);
+  // Not engaged → the normal cadence → the gate is not in play at all.
+  if (intervalMs <= PowerSavingPolicy.normalSyncIntervalMs) return false;
+  if (lastSyncAtMs == null) return false; // never synced → never gate the first one
+  final elapsedMs = nowMs - lastSyncAtMs;
+  if (elapsedMs < 0) return false; // future/skewed stamp → cannot prove → sync
+  return elapsedMs < intervalMs;
 }
 
 /// Whether the main app process is alive (owns BLE + the DB), judged by the freshness of the
@@ -260,6 +330,19 @@ Future<void> _runOneOffload(AppDatabase db, PairedStrap remembered) async {
   } finally {
     guard.cancel();
     await sub.cancel();
+    // Bank the strap battery this run observed, BEFORE the teardown drops it. The foreground path
+    // does this from `whoop_providers`, but this headless isolate builds its client directly and
+    // never touches Riverpod — so without this the snapshot the power-saving gate reads would be
+    // frozen at whenever the app was last open, which is precisely the regime (app killed for hours)
+    // the gate has to work in. Best-effort: a failed write only costs the gate one stale tick.
+    final pct = client.batteryNow;
+    if (pct != null) {
+      await Prefs.instance.recordBatteryReading(
+        pct: pct,
+        atMs: DateTime.now().millisecondsSinceEpoch,
+        charging: client.chargingNow,
+      );
+    }
     // Intentional teardown: drop the link (no auto-reconnect) and release every resource so the
     // isolate can exit and WorkManager can reap it. Awaited so any in-flight chunk drains before
     // the caller closes the DB — the abort is between chunks, never mid-ack.

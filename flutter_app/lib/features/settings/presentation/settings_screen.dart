@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'package:noop/core/analytics/engine_registry.dart';
+import 'package:noop/core/ble/sync/power_saving_policy.dart';
 import 'package:noop/core/data/portability/data_portability.dart';
 import 'package:noop/core/data/weather.dart';
 import 'package:noop/core/state/prefs.dart';
@@ -35,6 +36,16 @@ final _hydrationReminders =
 final _autoDetectWorkouts =
     StateProvider<bool>((_) => _tog('auto_detect_workouts', true));
 final _keepScreenOn = StateProvider<bool>((_) => _tog('keep_screen_on', false));
+
+// Power saving (strap-battery adaptive). Persisted as first-class [Prefs] fields rather than
+// `_tog` toggles because the threshold is an int, and because the headless WorkManager isolate
+// reads them straight out of Prefs — it never builds a provider container.
+final _powerSaving = StateProvider<bool>((_) => Prefs.instance.powerSavingEnabled);
+// Seeded THROUGH the policy's clamp so a legacy/corrupt stored value always lands on a real
+// segment of the picker below (a NoopSegmented value outside its own segments has no selection).
+final _powerSavingPct = StateProvider<int>((_) =>
+    PowerSavingPolicy(thresholdPct: Prefs.instance.powerSavingThresholdPct)
+        .effectiveThresholdPct);
 
 /// Flip a persisted toggle: update its provider and write it through to storage.
 void _setTog(WidgetRef ref, StateProvider<bool> p, String key, bool v) {
@@ -621,6 +632,51 @@ class _StrapSettings extends ConsumerWidget {
                 },
               ),
             ),
+      ]),
+      // Power saving — keyed on the STRAP's battery, never the phone's: the lever eases how much the
+      // STRAP has to transmit, so it buys the strap runtime when it wasn't charged in time. Off by
+      // default; the threshold picker only appears once it is armed.
+      SettingsGroup('Power saving', Palette.chargeColor, [
+        (r) => SettingsTile(
+              radius: r,
+              icon: Icons.battery_saver_rounded,
+              iconColor: Palette.chargeColor,
+              title: 'Ease the load when the strap is low',
+              detail: 'Syncs history every 45 min instead of 15 while your '
+                  "strap's battery is low. Nothing is lost — the strap keeps "
+                  'banking everything, so syncs just get larger and less frequent.',
+              trailing: NoopToggle(
+                value: ref.watch(_powerSaving),
+                onChanged: (v) {
+                  ref.read(_powerSaving.notifier).state = v;
+                  Prefs.instance.setPowerSavingEnabled(v);
+                },
+              ),
+            ),
+        if (ref.watch(_powerSaving))
+          (r) => SettingsTile(
+                radius: r,
+                icon: Icons.battery_alert_rounded,
+                iconColor: Palette.chargeColor,
+                title: 'Kick in at',
+                detail:
+                    'Strap battery ${ref.watch(_powerSavingPct)}% or lower, while not charging',
+                below: NoopSegmented<int>(
+                  expand: true,
+                  segments: const [
+                    NoopSegment(10, '10%'),
+                    NoopSegment(15, '15%'),
+                    NoopSegment(20, '20%'),
+                    NoopSegment(25, '25%'),
+                    NoopSegment(30, '30%'),
+                  ],
+                  value: ref.watch(_powerSavingPct),
+                  onChanged: (v) {
+                    ref.read(_powerSavingPct.notifier).state = v;
+                    Prefs.instance.setPowerSavingThresholdPct(v);
+                  },
+                ),
+              ),
       ]),
     ]);
   }

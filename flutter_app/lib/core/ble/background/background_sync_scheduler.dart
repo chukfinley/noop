@@ -26,6 +26,14 @@ import 'background_sync_service.dart' show backgroundSyncEnabledProvider;
 import 'background_sync_worker.dart';
 
 /// Android's periodic-work minimum is 15 minutes; anything lower is clamped to it by the OS.
+///
+/// This stays FIXED at the OS minimum even with power saving on. The strap-battery lever stretches
+/// the EFFECTIVE cadence to 45 min by having the headless task skip ticks
+/// (`background_sync_worker.powerSavingShouldSkipTick`) rather than by re-registering this job at a
+/// longer frequency: re-registration would need `ExistingPeriodicWorkPolicy.update` churn driven off
+/// a battery stream, and — decisively — the regime the lever exists for is an app that has been
+/// KILLED, where there is no main isolate left to observe a battery change and re-register anything.
+/// One stable tick + a pure gate is both simpler and the only version that works when it matters.
 const Duration _kSyncFrequency = Duration(minutes: 15);
 
 /// Only Android has a killed-app periodic path we can trust. iOS BGTaskScheduler is best-effort
