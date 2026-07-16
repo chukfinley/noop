@@ -5,7 +5,9 @@ import 'package:noop/core/analytics/sleep_stager.dart';
 
 /// Port of the intent of `MotionCorroboratedWakeTest.kt` / `MotionCorroboratedWakeTests.swift`
 /// (upstream #465, fixes #462) onto the simplified Dart heuristic, plus the whole-bridged-night
-/// window invariant #445 relies on.
+/// window invariant #345 relies on. (The split-night issue is #345; #445 is upstream's unrelated
+/// strap-log PII redaction — the label here was simply wrong. `split_night_test.dart` carries the
+/// substantive #345 coverage.)
 ///
 /// The rule under test: elevated HR ALONE must never score WAKE. A night that holds resting HR up
 /// without the wearer getting up (a supplement protocol, a fever, a hot room, alcohol) must not be
@@ -301,7 +303,7 @@ void main() {
     });
   });
 
-  group('window spans the whole bridged night (#445)', () {
+  group('window spans the whole bridged night (#345)', () {
     // A split night: the wearer is up for 5 min mid-night (within the 10-min bridge tolerance),
     // so the two fragments are ONE night. Totals and hypnogram must span the whole thing, not
     // stop at the winning fragment.

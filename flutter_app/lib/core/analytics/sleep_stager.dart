@@ -65,7 +65,32 @@ class SleepStager {
 
   // ── Tunables (fixed a-priori from adult sleep physiology) ────────────────
   static const int _minWindowEpochs = 240; // ~2h of epochs
-  static const int _maxGapEpochs = 20; // ~10 min interruption tolerated
+
+  // The mid-night interruption [_longestBout] bridges rather than treats as the
+  // end of the night (#345). 40 epochs = 20 MINUTES, matching the upstream
+  // stager's `maxGapMin = 20` ("data gap that always breaks a run") — the line
+  // both implementations draw between "got up for a moment" and "the night
+  // ended".
+  //
+  // This was 20 EPOCHS (10 min), half upstream's tolerance, and that unit slip
+  // was the whole of #345 here: a real waking of 12–20 min broke the bout, the
+  // night fell into two fragments, and [_longestBout] reported only the LONGER
+  // one. An 8 h night with a 12-minute bathroom break scored 4 h — Asleep-Total
+  // halved and the hypnogram axis covering half the night, on a night the wearer
+  // slept through fine. The gap epochs are not counted as sleep once bridged;
+  // they stage normally (hot + moving ⇒ awake), so the seam lands in `awakeSec`
+  // and efficiency drops exactly as it should. Bridging only decides where the
+  // NIGHT ends, never what counts as sleep.
+  //
+  // NOT extended to upstream's `nightContinuationGapMin = 90`. Upstream can
+  // rejoin a tail 90 min later because it gates that on machinery this heuristic
+  // does not have — a daytime band, `morningStillnessWindowMin` /
+  // `morningReonsetRestingHRMult` re-onset guards, a per-run daytime rejection.
+  // [_longestBout] bridges on the `sleepy` flags ALONE, so a 90-min bridge here
+  // would silently swallow an afternoon nap, or morning stillness, into the
+  // night. 20 min is the widest gap that is safe without those guards.
+  static const int _maxGapEpochs = 40; // 20 min interruption bridged (#345)
+
   static const double _hrSleepMargin = 13.0; // bpm above floor still "asleep"
   static const double _hrWakeMargin = 12.0; // bpm above baseline ≈ awake
 
