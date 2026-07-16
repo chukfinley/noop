@@ -117,11 +117,21 @@ class DayRecord {
   final DateTime date;
   final double charge; // recovery 0..100 (population mean while calibrating)
 
-  /// Non-null while recovery is NOT a real score yet: the count of valid HRV
-  /// nights collected so far (0..[recoveryCalibrationNightsNeeded]). The UI shows
-  /// "Calibrating N/4 nights" instead of [charge] when this is set. Null once the
-  /// baseline has calibrated and [charge] is a genuine recovery score.
+  /// Non-null ONLY while the personal HRV baseline is still seeding: the count of
+  /// valid HRV nights collected so far (0..[recoveryCalibrationNightsNeeded]).
+  /// The UI shows "Calibrating N/4 nights" instead of [charge] when this is set.
+  ///
+  /// Null does NOT mean [charge] is a score — check [chargeScored] for that.
+  /// A calibrated wearer whose night produced no usable HRV/RHR has no count to
+  /// report and is not calibrating anything; that night sets [chargeNoData].
   final int? chargeCalibrationNights;
+
+  /// True when recovery is unscoreable for THIS night even though the baseline
+  /// is not seeding — sparse RR (RMSSD needs >= 20 clean beats), no sleep window,
+  /// the strap not worn, or a baseline gone stale. [charge] is then a filler
+  /// population mean and must be rendered as "no data", never as a score and
+  /// never as calibration progress.
+  final bool chargeNoData;
 
   final double effort; // day strain 0..21
   final double rest; // sleep performance 0..100
@@ -144,6 +154,7 @@ class DayRecord {
     required this.date,
     required this.charge,
     this.chargeCalibrationNights,
+    this.chargeNoData = false,
     required this.effort,
     required this.rest,
     required this.stress,
@@ -188,8 +199,10 @@ class DayRecord {
         date: date,
         charge: charge ?? this.charge,
         // Carried through by default: an alt engine that also needs N nights to
-        // score recovery is calibrating in the same window (see OpenStrapEngine).
+        // score recovery is calibrating in the same window (see OpenStrapEngine),
+        // and a night that sourced no HRV sources none for any engine either.
         chargeCalibrationNights: chargeCalibrationNights,
+        chargeNoData: chargeNoData,
         effort: effort ?? this.effort,
         rest: rest ?? this.rest,
         stress: stress ?? this.stress,
@@ -208,9 +221,14 @@ class DayRecord {
         hr: hr ?? this.hr,
       );
 
-  /// True while recovery ([charge]) is not yet a real score — the UI shows a
+  /// True while the HRV baseline is still seeding — the UI shows a
   /// "Calibrating N/[recoveryCalibrationNightsNeeded]" state instead of a number.
   bool get chargeCalibrating => chargeCalibrationNights != null;
+
+  /// True when [charge] is a genuine recovery score. The ONLY safe gate for
+  /// rendering it as a number: the two unscored reasons ([chargeCalibrating],
+  /// [chargeNoData]) are mutually exclusive but both leave [charge] a filler.
+  bool get chargeScored => !chargeCalibrating && !chargeNoData;
 }
 
 /// User profile — drives HR-max, sleep-need, units.

@@ -490,23 +490,37 @@ class _Contrib {
 _Spec _specFor(MetricKind kind, DayRecord day, EffortScale effortScale) {
   switch (kind) {
     case MetricKind.recovery:
+      // Recovery has THREE states — a real score, a seeding baseline, or a night
+      // that sourced no usable HRV. `day.charge` is a filler population mean in
+      // the last two, so it may only be rendered when `chargeScored`.
       final recCalibrating = day.chargeCalibrating;
+      final recNoData = day.chargeNoData;
       return _Spec(
         title: 'Recovery',
-        value: recCalibrating ? 0 : day.charge,
+        value: day.chargeScored ? day.charge : 0,
         valueLabel: recCalibrating
             ? '${day.chargeCalibrationNights}/$recoveryCalibrationNightsNeeded'
-            : null,
+            : recNoData
+                ? '—'
+                : null,
         ramp: Palette.recoveryStops,
         color: Palette.chargeColor,
-        state: recCalibrating ? 'Calibrating' : Palette.recoveryState(day.charge),
+        state: recCalibrating
+            ? 'Calibrating'
+            : recNoData
+                ? 'No data'
+                : Palette.recoveryState(day.charge),
         blurb: recCalibrating
             ? 'Recovery learns your personal baseline over $recoveryCalibrationNightsNeeded '
                 'full nights before it scores — that avoids a misleading number from too '
                 'little data. Your HRV, resting heart rate and sleep below are already real.'
-            : day.charge < 50
-                ? 'Your body is still catching up. Keep effort moderate and prioritise rest today.'
-                : 'You are well recovered and have headroom for a harder session.',
+            : recNoData
+                ? 'Last night had too little clean heart-beat data to score recovery — '
+                    'your baseline is ready and waiting, so one good night of wear brings '
+                    'the score straight back. Nothing has been lost.'
+                : day.charge < 50
+                    ? 'Your body is still catching up. Keep effort moderate and prioritise rest today.'
+                    : 'You are well recovered and have headroom for a harder session.',
         field: (d) => d.charge,
         contributors: [
           _Contrib('Heart rate variability', '${day.hrv.round()}', 'ms',

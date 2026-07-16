@@ -122,6 +122,11 @@ class DailyPipeline {
 
     // ── Baselines: score against history, THEN fold tonight in ────────────────
     final hrvUsable = _hrvBase.usable;
+    // Captured PRE-fold, next to `hrvUsable`, because it answers the same
+    // question: was the baseline still seeding at the moment we scored? That —
+    // not the post-fold state — is what decides whether tonight is "calibrating"
+    // (see the reason block below).
+    final hrvSeeding = _hrvBase.status == BaselineStatus.calibrating;
     final recoveryVal = (hrv != null && rhr != null)
         ? RecoveryScorer.recovery(
             hrv: hrv,
@@ -134,21 +139,48 @@ class DailyPipeline {
             hrvBaselineUsable: hrvUsable,
           )
         : null;
-    // While the HRV baseline is still calibrating (or a day has no scoreable
-    // night), recovery is NOT a real score — the app shows a "calibrating
-    // N/needed nights" state instead of a fabricated number. `charge` still
-    // carries the population mean so downstream numeric fields stay finite, but
-    // [DayRecord.chargeCalibrationNights] flags that it must not be shown as a
-    // score. Count includes tonight's night if it produced HRV.
+    // When recovery does not score, `charge` still carries the population mean so
+    // downstream numeric fields stay finite — but it is NOT a score and the UI
+    // must never render it as one (the fake 58 removed in 2a2eb326).
     final charge = recoveryVal ?? engines.recoveryPopulationMean;
-    final chargeCalibrationNights = recoveryVal != null
-        ? null
-        : math.min(baselineProvisionalMinNights,
-            _hrvBase.nValid + (hrv != null ? 1 : 0));
 
     if (hrv != null) Baselines.update(_hrvBase, 'hrv', hrv);
     if (rhr != null) Baselines.update(_rhrBase, 'resting_hr', rhr.toDouble());
     if (resp != null) Baselines.update(_respBase, 'resp', resp);
+
+    // ── WHY recovery did not score — read AFTER the fold ──────────────────────
+    // Recovery is HRV-baseline-dominant, and it can fail to score for two very
+    // different reasons. Collapsing them into one "calibrating" state lies to a
+    // calibrated wearer, so the reason travels with the record:
+    //
+    //   * SEEDING — the baseline had not yet reached the seed gate when we
+    //     scored ⇒ honest "Calibrating N/4 nights".
+    //   * NO DATA — the baseline was ready (or has gone stale), but tonight
+    //     produced no usable HRV/RHR: sparse RR (RMSSD needs >= 20 clean beats),
+    //     no sleep window, or the strap was not worn. Nothing is calibrating and
+    //     nothing is scoreable — say exactly that.
+    //
+    // Gating on the PRE-fold `hrvSeeding` is what fixes the reported defect: the
+    // old code flagged EVERY unscored night as calibrating and reported
+    // `min(4, nValid + (hrv != null ? 1 : 0))`, so a fully-calibrated wearer
+    // (nValid = 30) with one sparse-RR night read "CALIBRATING 4/4" behind an
+    // empty gauge — and a STALE baseline (nValid >= 14, no fold for 14+ nights)
+    // read the same. The `min` did not clamp a rounding wart; it MASKED a
+    // 30-vs-4 over-statement. Upstream's helper guards the same way (n >= seed
+    // → nil).
+    //
+    // The count is now the authoritative POST-fold `nValid`, never the old
+    // `+ 1` PREDICTION of a fold that the bounds gate may refuse — HRV outside
+    // 5..250 ms is seen but never folded, so the prediction over-stated N by one
+    // on exactly the nights a wearer would most question the number.
+    //
+    // No clamp is needed and none is used: `hrvSeeding` implies nValid <= 3
+    // pre-fold (Baselines.update leaves `calibrating` only below the gate), so
+    // the post-fold count is <= 4 by construction. A clamp here would hide a
+    // broken invariant rather than surface it; the tests pin it instead.
+    final chargeCalibrationNights =
+        (recoveryVal == null && hrvSeeding) ? _hrvBase.nValid : null;
+    final chargeNoData = recoveryVal == null && !hrvSeeding;
 
     // ── Effort (day strain, 0..100) over the full day's HR ───────────────────
     final restHrForStrain = (rhr ?? 60).toDouble();
@@ -202,6 +234,7 @@ class DailyPipeline {
       date: day.date,
       charge: _r1(charge),
       chargeCalibrationNights: chargeCalibrationNights,
+      chargeNoData: chargeNoData,
       effort: _r1(effort),
       rest: _r1(rest),
       stress: _r1(stress100),

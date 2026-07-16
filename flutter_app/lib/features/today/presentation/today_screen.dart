@@ -660,9 +660,15 @@ class _Hero extends ConsumerWidget {
           value: day.charge,
           ramp: Palette.recoveryStops,
           color: Palette.chargeColor,
-          calibrationText: day.chargeCalibrating
+          // Three states, never two: a real score, honest calibration progress,
+          // or an honest nothing. `day.charge` is a filler population mean in the
+          // latter two, so only `chargeScored` may render it.
+          unscoredText: day.chargeCalibrating
               ? '${day.chargeCalibrationNights}/$recoveryCalibrationNightsNeeded'
-              : null,
+              : day.chargeNoData
+                  ? '—'
+                  : null,
+          unscoredLabel: day.chargeCalibrating ? 'CALIBRATING' : 'NO DATA',
           onTap:
               editing ? null : () => _openDetail(context, MetricKind.recovery),
         );
@@ -810,10 +816,15 @@ class _HeroCell extends ConsumerWidget {
   final VoidCallback? onTap;
   final bool isEffort;
 
-  /// When set, the metric is not scoreable yet (e.g. recovery is still
-  /// calibrating its baseline): the gauge reads empty and shows this text (like
-  /// "2/4") instead of a misleading number.
-  final String? calibrationText;
+  /// When set, [value] is NOT a real score: the gauge reads empty and shows this
+  /// text (like "2/4" while a baseline seeds, or "—" for a night that sourced no
+  /// data) instead of a misleading number.
+  final String? unscoredText;
+
+  /// The overline shown in place of [label] while [unscoredText] is set — the
+  /// REASON, since "calibrating" and "no data" are different states and only one
+  /// of them is progress.
+  final String? unscoredLabel;
   const _HeroCell({
     required this.label,
     required this.value,
@@ -821,15 +832,16 @@ class _HeroCell extends ConsumerWidget {
     required this.color,
     this.onTap,
     this.isEffort = false,
-    this.calibrationText,
+    this.unscoredText,
+    this.unscoredLabel,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final style = ref.watch(gaugeStyleProvider);
-    final calibrating = calibrationText != null;
-    final centerText = calibrating
-        ? calibrationText!
+    final unscored = unscoredText != null;
+    final centerText = unscored
+        ? unscoredText!
         : (isEffort
             ? Fmt.effort(value, ref.watch(effortScaleProvider))
             : value.round().toString());
@@ -848,17 +860,17 @@ class _HeroCell extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               MetricGauge(
-                fraction: calibrating ? 0 : (value / 100).clamp(0, 1),
+                fraction: unscored ? 0 : (value / 100).clamp(0, 1),
                 ramp: ramp,
                 size: 78,
                 center: Text(centerText,
-                    style: NoopType.number(calibrating ? 22 : 24).copyWith(
+                    style: NoopType.number(unscored ? 22 : 24).copyWith(
                       color: gaugeCenterColor(style),
                       shadows: gaugeCenterShadows(style),
                     )),
               ),
               const SizedBox(height: Metrics.space12),
-              Text(calibrating ? 'CALIBRATING' : label.toUpperCase(),
+              Text(unscored ? (unscoredLabel ?? '') : label.toUpperCase(),
                   style: NoopType.overline
                       .copyWith(color: color, letterSpacing: 1.6)),
             ],
@@ -1040,16 +1052,28 @@ class _YourCards extends ConsumerWidget {
           label: 'Recovery',
           value: day.chargeCalibrating
               ? '${day.chargeCalibrationNights}/$recoveryCalibrationNightsNeeded'
-              : day.charge.round().toString(),
-          unit: day.chargeCalibrating ? 'nights' : '%',
+              : day.chargeNoData
+                  ? '—'
+                  : day.charge.round().toString(),
+          unit: day.chargeCalibrating
+              ? 'nights'
+              : day.chargeNoData
+                  ? ''
+                  : '%',
           state: day.chargeCalibrating
               ? 'Calibrating'
-              : Palette.recoveryState(day.charge),
+              : day.chargeNoData
+                  ? 'No data'
+                  : Palette.recoveryState(day.charge),
           color: Palette.chargeColor,
           caption: day.chargeCalibrating
               ? 'Recovery needs $recoveryCalibrationNightsNeeded full nights to '
                   'learn your baseline. HRV, resting HR & sleep are already real.'
-              : 'Higher, steadier peaks mean better readiness.',
+              : day.chargeNoData
+                  ? 'Last night had too little clean heart-beat data to score '
+                      'recovery. Your baseline is ready — one good night of wear '
+                      'and it scores again.'
+                  : 'Higher, steadier peaks mean better readiness.',
           day: day,
           tappable: !editing,
         );
