@@ -38,11 +38,29 @@ class MetricConfig {
 class Baselines {
   Baselines._();
 
+  /// Default per-metric configurations (HRV, resting HR, respiration, skin temp, daily
+  /// Effort/strain).
+  ///
+  /// `'strain'` backs the [ChargeTerms] Activity-Balance / previous-day-Effort Charge term
+  /// (#436): bounds match [StrainScorer.maxStrain]'s 0–100 output scale, and `floorSpread` is
+  /// deliberately WIDER than the physiological metrics (5.0 vs ~1–2% of range elsewhere) because
+  /// day-to-day training load is EXPECTED to swing hard — a rest day vs a hard day is a normal,
+  /// large delta — and a tight floor would make the z-score hypersensitive to routine training
+  /// variation. It shares the other metrics' half-lives, which in this port are the file-level
+  /// `_centerHalfLife`/`_spreadHalfLife` constants rather than per-metric fields (upstream carries
+  /// `halfLifeB`/`halfLifeS` on every `MetricCfg` and sets them to the same 14/21 for all five, so
+  /// the two shapes agree).
+  ///
+  /// Registering `'strain'` is INERT for the existing metrics: every consumer of this map is a
+  /// lookup-by-key ([update] takes the metric name), never an enumeration, so no other metric's
+  /// fold changes. Nothing scores against it until a caller supplies a previous-day Effort — see
+  /// [ChargeTerms.activityBalanceTerm].
   static const configs = <String, MetricConfig>{
     'hrv': MetricConfig(5, 250, 5),
     'resting_hr': MetricConfig(30, 120, 2),
     'resp': MetricConfig(4, 40, 0.5),
     'skin_temp': MetricConfig(20, 42, 0.3),
+    'strain': MetricConfig(0, 100, 5),
   };
 
   static const _centerHalfLife = 14.0;

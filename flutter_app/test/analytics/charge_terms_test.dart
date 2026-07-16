@@ -199,10 +199,25 @@ void main() {
       expect(strainCfg.floorSpread, greaterThan(Baselines.configs['resp']!.floorSpread));
     });
 
-    test('NOT yet registered in Baselines.configs — wiring is owned elsewhere', () {
-      // Documents the current, deliberate state (see charge_terms.dart header). When the owner of
-      // baselines.dart registers it, flip this to expect the entry to be present.
-      expect(Baselines.configs.containsKey(strainMetricKey), isFalse);
+    test('registered in Baselines.configs, and strainCfg reads THAT entry (no second copy)', () {
+      // Upstream v9.0.0 carries "strain" in `Baselines.metricCfg` and exposes `strainCfg` as a
+      // convenience accessor onto it. Pinning identity (not just equal numbers) is the point: it
+      // is what makes it impossible for the config `Baselines.update` folds with to drift from the
+      // config `activityBalanceTerm` z-scores against.
+      expect(Baselines.configs.containsKey(strainMetricKey), isTrue);
+      expect(identical(strainCfg, Baselines.configs[strainMetricKey]), isTrue);
+    });
+
+    test('registering "strain" left every other metric untouched', () {
+      // The entry is inert by construction: every `Baselines.configs` consumer is a
+      // lookup-by-key, never an enumeration. Pin the other four configs verbatim so adding a
+      // fifth can never be what changes an existing metric's fold.
+      expect(Baselines.configs['hrv']!.minVal, 5);
+      expect(Baselines.configs['hrv']!.maxVal, 250);
+      expect(Baselines.configs['hrv']!.floorSpread, 5);
+      expect(Baselines.configs['resting_hr']!.floorSpread, 2);
+      expect(Baselines.configs['resp']!.floorSpread, 0.5);
+      expect(Baselines.configs['skin_temp']!.floorSpread, 0.3);
     });
 
     test('an Effort baseline built with strainCfg scores rest/hard days with the right signs', () {

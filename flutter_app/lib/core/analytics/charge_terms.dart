@@ -22,21 +22,48 @@
 /// `dailyMetrics.effort` columns. So these terms belong to RECOVERY, not to `StrainScorer`.
 ///
 /// ---------------------------------------------------------------------------
-/// STATUS: DORMANT + NOT YET WIRED. Read this before using.
+/// STATUS: WIRED, DEFAULT-OFF. Read this before turning it on.
 /// ---------------------------------------------------------------------------
-/// Upstream folds both terms directly into `RecoveryScorer.recovery(...)` as new optional,
-/// null-default parameters, and adds a `"strain"` MetricCfg to `Baselines`. That renormalizing
-/// `terms` loop lives INSIDE `recovery(...)`, so a term cannot be added to it from another file.
+/// Verified against the real upstream v9.0.0 source (`RecoveryScorer.kt` /
+/// `RecoveryScorer.swift`), not just its release notes:
 ///
-/// This file therefore carries everything that IS portable standalone — the slope function, both
-/// term transforms, the weights, and the strain baseline config — fully tested and ready to wire,
-/// while `recovery_scorer.dart` and `baselines.dart` are owned elsewhere. The remaining wiring is
-/// mechanical and additive; see the file-level report / [foldInto] for the exact shape.
+///   * Upstream folds both terms into `recovery(...)` as optional, NULL-DEFAULT parameters
+///     (`recoveryIndexSlope`, `effortBaseline`, `priorDayEffort`), and registers a `"strain"`
+///     `MetricCfg` in `Baselines`. The `"strain"` entry IS landed upstream — this port now carries
+///     it too (see [Baselines.configs] / [strainCfg]).
+///   * Upstream ships NO production caller that supplies any of the three: a grep over both
+///     platforms finds only the internal `recovery(...)` overload forwarding them, plus tests.
+///     Upstream's own header says "dormant until a caller supplies them", and upstream's test
+///     header states the central pinned claim outright: *"Both terms are DORMANT (null-default);
+///     the central claim pinned here is that every existing caller's score is byte-identical to
+///     before they existed."*
 ///
-/// Upstream is itself dormant here ("no caller on either platform supplies the new signals") and
-/// notes that switching these terms on for live Charge is a scoring change to the flagship metric,
-/// so it needs a default-off/experimental toggle or validated marginal impact. Nothing in this file
-/// changes any existing score: it is additive, and every entry point is opt-in.
+/// So "dormant" is upstream's INTENT, not an unfinished port. This port keeps that intent while
+/// making the code reachable: [DailyPipeline] supplies all three from real data, gated on
+/// `DailyPipeline.experimentalChargeTerms`, which DEFAULTS TO FALSE. Off, Charge is byte-identical
+/// to before this file existed — the same guarantee upstream pins. Nothing in the shipping app
+/// turns it on: `NoopEngine` does not pass the flag, so only tests do. That mirrors upstream
+/// exactly, where only tests pass the parameters.
+///
+/// BEFORE TURNING IT ON — a real, unresolved defect in the upstream design, not in this port:
+/// [recoveryIndexTerm] is NOT CENTERED. Its neutral point is a slope of 0 (a flat overnight HR),
+/// but a flat overnight HR is not typical — a healthy night's resting HR DECLINES, so a normal
+/// night scores ≈ +1 z on this term rather than ≈ 0. Unlike `sleepPerf` (centered on a "good night"
+/// at [RecoveryScorer.sleepPerfCenter] = 0.85) and `skinTempDev` (centered on 0 deviation, which IS
+/// typical), this term's fixed scale has no centering constant, so it acts mostly as a CONSTANT
+/// UPWARD SHIFT of Charge rather than as a discriminator between good and bad nights. Charge is
+/// calibrated so z = 0 → 58% ([RecoveryScorer.populationMean]); an uncentered term breaks that
+/// anchor.
+///
+/// Measured on an otherwise exactly-average night (composite z = 0 → the 57.93 anchor, baseWeight
+/// 0.95): a physiologically TYPICAL −2 bpm/h decline scores z = +1.0 on this term and lifts Charge
+/// to 59.87 (+1.94), while the whole spread between that typical night and a poor −0.5 bpm/h night
+/// is just 1.45 points. The constant offset is LARGER than the term's entire discriminative range —
+/// i.e. it mostly re-anchors the flagship metric upward and only incidentally tells good nights
+/// from bad. Fixing it needs either a centering constant (a number nobody has measured — inventing
+/// one here would be a fabrication) or a personal EWMA baseline for the slope, i.e. a
+/// `'recovery_index'` entry in [Baselines.configs] fed by a real nightly slope history. Until one
+/// of those exists AND the marginal impact is validated on real nights, the flag stays off.
 library;
 
 import 'dart:math' as math;
@@ -44,19 +71,14 @@ import 'dart:math' as math;
 import 'package:noop/core/analytics/baselines.dart';
 import 'package:noop/core/analytics/recovery_scorer.dart';
 
-/// A baseline config for daily Effort/strain — upstream's `"strain"` `MetricCfg` (#436).
+/// The baseline config for daily Effort/strain — upstream's `"strain"` `MetricCfg` (#436).
 ///
-/// Bounds match [StrainScorer.maxStrain]'s 0–100 output scale (the Charge/Effort/Rest redesign's
-/// rescale of the historical 0–21 axis). `floorSpread` is deliberately WIDER than the physiological
-/// metrics (5.0, vs ~1–2% of range elsewhere) because day-to-day training load is EXPECTED to swing
-/// hard — a rest day vs a hard day is a normal, large delta — and a tight floor would make the
-/// z-score hypersensitive to routine training variation.
-///
-/// NOT YET REGISTERED: upstream adds this under the key [strainMetricKey] in `Baselines.metricCfg`.
-/// `baselines.dart` is owned elsewhere, so this constant stands ready but is not in
-/// `Baselines.configs` yet. Every `Baselines.configs` consumer is a lookup-by-key (no enumerators),
-/// so adding the entry is inert for existing metrics.
-const MetricConfig strainCfg = MetricConfig(0, 100, 5);
+/// A convenience ACCESSOR onto the registry entry, mirroring upstream's
+/// `val strainCfg: MetricCfg get() = metricCfg.getValue("strain")`. It is deliberately not a
+/// second copy of the numbers: [Baselines.configs] is the single source of truth, so the config
+/// [Baselines.update] folds with and the config this term z-scores against cannot drift apart.
+/// See [Baselines.configs] for why the bounds and the wide `floorSpread` are what they are.
+MetricConfig get strainCfg => Baselines.configs[strainMetricKey]!;
 
 /// The `Baselines.configs` key the [strainCfg] entry should be registered under.
 const String strainMetricKey = 'strain';
