@@ -42,6 +42,18 @@ class SleepResult {
 
   final int disturbances; // count of awakenings within the window
   final List<SleepSegmentK> hypnogram; // ordered, covers [startTs,endTs]
+
+  /// Fraction of the staged window's epochs that carried a motion sample (0..1).
+  final double motionCoverage;
+
+  /// True when this night was staged on motion too sparse to trust the staging
+  /// (#345) — see [SleepStager.motionSparseOver]. CONFIDENCE ONLY: it never
+  /// changes a stage, a total or [efficiency]. The night still scores exactly as
+  /// it did; this says only how much the staging can be believed, which is
+  /// upstream's rule too ("Confidence-only — it never changes the Rest score or
+  /// invents stages"; the engine emits the tier and the UI surfaces it later).
+  final bool motionSparse;
+
   const SleepResult({
     required this.startTs,
     required this.endTs,
@@ -55,6 +67,8 @@ class SleepResult {
     required this.respRate,
     required this.disturbances,
     required this.hypnogram,
+    this.motionCoverage = 1.0,
+    this.motionSparse = false,
   });
 }
 
@@ -134,6 +148,16 @@ class SleepStager {
   static const double _quiescentMadMult = 4.0; // within floor ± this × MAD ≈ still
   static const double _excursionMadMult = 8.0; // beyond floor + this × MAD ≈ clearly moved
 
+  /// Motion coverage of the staged window below which the staging is treated as
+  /// LOW-CONFIDENCE (#345). Mirrors upstream's `sparseGravitySpanFrac = 0.5`.
+  ///
+  /// Upstream compares the GRAVITY timespan against the HR timespan; the closest
+  /// honest analogue we can compute is the fraction of staged epochs that carried
+  /// a motion sample at all, because by the time samples reach this stager the two
+  /// channels have already been merged onto one per-second row. See
+  /// [motionSparseOver] for what that does and does not catch.
+  static const double sparseMotionCoverageFrac = 0.5;
+
   /// epochTs/epochHr/epochMovement are parallel & time-ordered over ~24h of
   /// ONE day. epochHr entries may be null (no HR that epoch).
   ///
@@ -147,11 +171,24 @@ class SleepStager {
   /// resting magnitude with the day's quiet level subtracted, so a still wrist
   /// reads ~0 there — but nothing here may assume that.
   ///
+  /// A null entry means NO MOTION SAMPLE that epoch — unknown, not "moved a lot".
+  /// The distinction is load-bearing and was the whole of a real defect: the
+  /// producer used to encode "no sample" as the magnitude 5.0, and because the
+  /// scale is by contract night-relative, that sentinel did not merely mis-stage
+  /// its own epoch — it HIJACKED the median + MAD every other epoch is measured
+  /// against. Once dropouts passed ~half the window the median jumped to the
+  /// sentinel, every genuinely still epoch fell outside the quiescent gate, and
+  /// the #462 motion corroboration below inverted: a still wrist read as moving,
+  /// so ordinary overnight HR excursions were scored as awakenings (measured:
+  /// 48 phantom disturbances on a still 8h night the strap reported asleep
+  /// throughout). Unknown must stay unknown; there is no magnitude that can
+  /// honestly stand in for a missing sample.
+  ///
   /// Returns null if no plausible sleep window (>= ~2h) is found.
   static SleepResult? detect({
     required List<int> epochTs,
     required List<double?> epochHr,
-    required List<double> epochMovement,
+    required List<double?> epochMovement,
     double? dayHrMin,
     List<bool>? epochAsleep,
   }) {
@@ -315,6 +352,11 @@ class SleepStager {
       respRate: respRate,
       disturbances: disturbances,
       hypnogram: hypnogram,
+      // Measured over the STAGED window, not the whole day: it qualifies this
+      // night's staging, and a day is mostly epochs the stager never looked at.
+      motionCoverage:
+          winLen == 0 ? 1.0 : windowMv.whereType<double>().length / winLen,
+      motionSparse: motionSparseOver(windowMv),
     );
   }
 
@@ -363,10 +405,23 @@ class SleepStager {
   /// units make that — and the MAD is the night's motion scale, so everything
   /// built on this self-calibrates to the strap and the fit instead of pinning a
   /// value that means different things on different nights.
-  static (List<double>, double) _motionScale(List<double> windowMovement) {
-    final floor = _median(windowMovement);
-    final dev = <double>[for (final m in windowMovement) (m - floor).abs()];
-    return (dev, _median(dev));
+  ///
+  /// Epochs with NO motion sample are excluded from BOTH medians and carry a null
+  /// deviation. They are not evidence of stillness or of motion, so letting them
+  /// vote on the night's own scale would let the amount of MISSING data move the
+  /// gates the present data is judged by — which is exactly how the old 5.0
+  /// "no sample" sentinel manufactured awakenings (see [detect]). A dropout now
+  /// costs the scale nothing but its own absence.
+  static (List<double?>, double) _motionScale(List<double?> windowMovement) {
+    final sampled = windowMovement.whereType<double>().toList();
+    if (sampled.isEmpty) {
+      return (List<double?>.filled(windowMovement.length, null), 0.0);
+    }
+    final floor = _median(sampled);
+    final dev = <double?>[
+      for (final m in windowMovement) m == null ? null : (m - floor).abs(),
+    ];
+    return (dev, _median(dev.whereType<double>().toList()));
   }
 
   /// Per-epoch "the wrist did not move this epoch" verdicts over ONE night's
@@ -384,12 +439,17 @@ class SleepStager {
   /// A trace with a zero MAD (every epoch at the same coarsely-quantised value)
   /// admits only epochs exactly at the floor, so the verdict degrades toward the
   /// strict pre-corroboration behaviour rather than waving wake through.
+  ///
+  /// An epoch with NO motion sample is NOT quiescent: we cannot claim the wrist
+  /// was still on evidence we never collected. It is not an excursion either
+  /// ([motionExcursion]), so it lands in the same dead band as an epoch that is
+  /// neither plainly still nor plainly moving — corroborating nothing either way.
   /// Pure + deterministic.
-  static List<bool> motionQuiescent(List<double> windowMovement) {
+  static List<bool> motionQuiescent(List<double?> windowMovement) {
     if (windowMovement.isEmpty) return const <bool>[];
     final (dev, mad) = _motionScale(windowMovement);
     final gate = mad * _quiescentMadMult;
-    return <bool>[for (final d in dev) d <= gate];
+    return <bool>[for (final d in dev) d != null && d <= gate];
   }
 
   /// Per-epoch "the wrist CLEARLY moved this epoch" verdicts over ONE night's
@@ -404,13 +464,60 @@ class SleepStager {
   /// promote every off-floor epoch. (Note this is the opposite branch of the
   /// same coin as [motionQuiescent]'s zero-MAD case, which stays strict — both
   /// degrade AWAY from inventing sleep-state changes.)
+  ///
+  /// An epoch with NO motion sample never qualifies, for the same reason it is
+  /// not quiescent: absence of data is not evidence of movement.
   /// Pure + deterministic.
-  static List<bool> motionExcursion(List<double> windowMovement) {
+  static List<bool> motionExcursion(List<double?> windowMovement) {
     if (windowMovement.isEmpty) return const <bool>[];
     final (dev, mad) = _motionScale(windowMovement);
     if (mad <= 0) return List<bool>.filled(windowMovement.length, false);
     final gate = mad * _excursionMadMult;
-    return <bool>[for (final d in dev) d > gate];
+    return <bool>[for (final d in dev) d != null && d > gate];
+  }
+
+  /// True when [windowMovement] is too sparse for the staging built on it to be
+  /// trusted (#345), by either of upstream `isGravitySparse`'s two tests:
+  ///
+  ///   * COVERAGE — motion samples cover < [sparseMotionCoverageFrac] of the
+  ///     staged epochs (upstream: gravity span < 0.5 × HR span); or
+  ///   * LARGEST GAP — the longest unbroken run of sample-less epochs exceeds
+  ///     [_maxGapEpochs], the same 20 min this stager already calls the line
+  ///     between "got up for a moment" and "the night ended". Upstream tests the
+  ///     largest gap rather than the median for the reason that matters here: a
+  ///     WHOOP 4.0 offload banks motion in CLUMPS, so dense bursts split by a few
+  ///     long dropouts keep a small median gap while still hiding run-breaking
+  ///     holes. A median would call that night dense.
+  ///
+  /// WHAT THIS DOES NOT CATCH, and why it is still worth having: our
+  /// `LiveRepository` merges HR and gravity onto one per-second row and defaults a
+  /// row with HR but no accel to `movement: 1.0` (the resting magnitude). So a
+  /// second that never carried a gravity sample is INDISTINGUISHABLE here from a
+  /// second whose wrist was genuinely still — the sparsity is erased upstream of
+  /// this stager, and the classic WHOOP 4.0 case (dense HR, coarse gravity) will
+  /// read as fully covered and NOT trip this guard. What this does catch is a
+  /// night with real holes in the banked data, which is producer-fed and, until
+  /// that default is fixed, the honest half of the signal. Making
+  /// `RawSample.movement` nullable end-to-end is what would close the other half.
+  ///
+  /// An empty window is not sparse (there is no staging to doubt).
+  /// Pure + deterministic.
+  static bool motionSparseOver(List<double?> windowMovement) {
+    final n = windowMovement.length;
+    if (n == 0) return false;
+    var sampled = 0;
+    var gap = 0, largestGap = 0;
+    for (final m in windowMovement) {
+      if (m != null) {
+        sampled++;
+        gap = 0;
+      } else {
+        gap++;
+        if (gap > largestGap) largestGap = gap;
+      }
+    }
+    if (sampled < sparseMotionCoverageFrac * n) return true;
+    return largestGap > _maxGapEpochs;
   }
 
   /// Median of a non-empty list (spike-robust central tendency).

@@ -437,6 +437,8 @@ class DailyPipeline {
       hypnogram: hypnogram,
       restlessness: restlessness,
       disturbances: sr.disturbances,
+      // Confidence only (#345) — the stages and totals above are untouched.
+      motionSparse: sr.motionSparse,
     );
   }
 
@@ -543,10 +545,9 @@ class DailyPipeline {
     // Per-epoch raw motion = mean deviation from the 1 g resting magnitude.
     // The strap's accel scalar is noisy, so an absolute threshold is unreliable;
     // instead we normalize by the day's quiet-baseline (10th percentile of
-    // sampled epochs) so a still wrist maps to ≈0 and the stager's fixed
-    // thresholds separate rest from motion. Empty epochs (no samples — daytime
-    // gaps in the sparse capture) are forced non-still so they can't be mistaken
-    // for sleep.
+    // sampled epochs) so a still wrist maps to ≈0 and the stager measures motion
+    // against the night's own level. Epochs with no samples stay NULL — see the
+    // channel's contract in [SleepStager.detect]; "unknown" is not a magnitude.
     final rawMotion = <double?>[];
     for (var b = 0; b < nBins; b++) {
       rawMotion.add(cntMv[b] > 0 ? sumMv[b] / cntMv[b] : null);
@@ -556,7 +557,7 @@ class DailyPipeline {
 
     final ts = <int>[];
     final hr = <double?>[];
-    final mv = <double>[];
+    final mv = <double?>[];
     // Per-epoch strap asleep verdict: majority of the bin's stateful samples say
     // asleep. A bin with no state sample (a gap) counts as awake, so gaps can't
     // extend a night. Null overall when the day has no strap sleep_state at all.
@@ -566,8 +567,21 @@ class DailyPipeline {
       final hasHr = cntHr[b] > 0;
       hr.add(hasHr ? sumHr[b] / cntHr[b] : null);
       final m = rawMotion[b];
-      // No samples at all → treat as awake/active (5.0), never a sleep epoch.
-      mv.add(m == null ? 5.0 : math.max(0.0, m - quiet));
+      // No samples at all → NULL, never a magnitude. This epoch's motion is
+      // unknown, and [SleepStager]'s channel is night-relative by contract, so a
+      // stand-in value does not stay local to its own epoch: it moves the median
+      // + MAD every OTHER epoch is judged against. The 5.0 "forced non-still"
+      // sentinel this replaces did exactly that — past ~half the window it
+      // dragged the median up to itself, pushed every genuinely still epoch
+      // outside the quiescent gate, and inverted the #462 motion corroboration
+      // into scoring ordinary overnight HR excursions as awakenings (measured:
+      // 48 phantom disturbances on a still night the strap called asleep
+      // throughout; see `sleep_motion_sparsity_test.dart`). Its stated purpose —
+      // stopping empty epochs being mistaken for sleep — was never served by it
+      // either: an epoch with no samples has no HR, and the stager's `sleepy`
+      // gate is HR/strap-driven, so a sample-less epoch cannot enter a window on
+      // its own account regardless of what we put here.
+      mv.add(m == null ? null : math.max(0.0, m - quiet));
       if (asleep != null && stateCnt[b] > 0) {
         asleep[b] = asleepCnt[b] * 2 >= stateCnt[b];
       }
@@ -613,7 +627,10 @@ class DailyPipeline {
 class _Epochs {
   final List<int> ts;
   final List<double?> hr;
-  final List<double> mv;
+
+  /// Per-epoch motion magnitude, NULL where the epoch carried no sample — the
+  /// contract [SleepStager.detect] documents. Never a sentinel magnitude.
+  final List<double?> mv;
 
   /// Per-epoch strap-reported asleep mask (#175), or null when this day carries
   /// no strap sleep_state (the stager then uses its HR heuristic).
