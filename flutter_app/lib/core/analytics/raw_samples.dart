@@ -44,10 +44,26 @@ class RawSample {
   final double? movement;
 
   /// The strap's OWN per-second sleep state (WHOOP `sleep_state`, #175), carried
-  /// verbatim: 0 = awake, non-zero = a sleep stage. `null` when the source has no
-  /// such channel (e.g. the bundled asset) — the pipeline then falls back to its
-  /// HR-derived sleep detection. This is the band's ground-truth sleep signal, so
-  /// when present it drives the sleep window instead of re-deriving it from HR.
+  /// verbatim. `null` when the source has no such channel — a WHOOP 4.0 emits none
+  /// at all (it is decoded only from 5.0/MG v18 records), as does the bundled
+  /// asset; the pipeline then falls back to its HR-derived sleep detection.
+  ///
+  /// NOT a proven ground-truth signal, and deliberately not documented as one. It
+  /// is a 2-BIT field — `(frame[81] >> 4) & 3` — so it cannot carry light/deep/REM
+  /// under any reading. The `0 wake / 1 still / 2 asleep / 3 up` gloss is
+  /// STRUCTURAL INFERENCE: upstream's ad4cc1f4 states the boundary outright ("the
+  /// meaning of the non-zero codes is structural inference; every frame we hold
+  /// reads 0"), and a sweep of the RE repo found no grounding for byte 81 — the
+  /// official app never decodes it, because its staging is server-side.
+  ///
+  /// We nonetheless let it drive the sleep WINDOW (e412e0ed), on the strength of a
+  /// phone-DB check that matched the band's bouts to ~1 min. That corroborates the
+  /// bounds; it does not decode the codes. Two consequences follow, both real:
+  /// `_buildEpochs`'s `st != 0` counts code 3 — inferred as "up" — as asleep; and
+  /// the channel co-emits with gravity in the same per-second record, so it is
+  /// silent exactly where motion is (see [SleepStager.detect] and c35c7bd9).
+  /// Widening its role beyond the window needs frames that actually carry non-zero
+  /// codes, not a re-reading of the gloss.
   final int? sleepState;
 
   const RawSample({
