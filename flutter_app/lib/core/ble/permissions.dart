@@ -27,16 +27,42 @@ bool get _blePlatform {
   return Platform.isAndroid || Platform.isIOS;
 }
 
-/// Requests (once) the permissions needed to scan for and connect to the strap
-/// over BLE, and returns whether the app ended up with what it needs.
+/// The outcome of one BLE permission request, rich enough for `BlePermissionGate` to tell a
+/// re-promptable state from a latched one. A bare bool cannot: it collapses "the user has not been
+/// asked yet" and "the OS will never ask again" into the same value, which is exactly the conflation
+/// that produced a single dead `'Bluetooth permission denied.'` string for both.
+class BlePermissionRequestResult {
+  const BlePermissionRequestResult({
+    required this.granted,
+    required this.permanentlyDenied,
+  });
+
+  /// Scan AND connect both came back granted — the transport is clear to proceed.
+  final bool granted;
+
+  /// The platform latched the denial: no amount of retrying will raise the dialog again, so only
+  /// system Settings can change it. Folds in iOS `restricted` (a managed device / Screen Time
+  /// blocking Bluetooth), which is equally un-retryable — the two differ only in the wording of the
+  /// guidance, which `BlePermissionGate.hintFor` owns.
+  final bool permanentlyDenied;
+
+  /// Off-mobile there is no runtime-permission model to fail, so every caller is clear to proceed.
+  static const BlePermissionRequestResult notApplicable =
+      BlePermissionRequestResult(granted: true, permanentlyDenied: false);
+}
+
+/// Requests the permissions needed to scan for and connect to the strap over BLE, reporting BOTH
+/// whether we ended up with what we need and whether a refusal is latched.
 ///
-/// Safe to call on any platform: on desktop/web it returns `true` without
-/// touching the plugin, so callers can treat a `true` result as "clear to
-/// proceed" everywhere. `permission_handler` itself only shows the system dialog
-/// the first time; subsequent calls resolve immediately from the stored decision.
-Future<bool> ensureBlePermissions() async {
+/// Safe to call on any platform: on desktop/web it reports granted without touching the plugin, so
+/// callers can treat it as "clear to proceed" everywhere. `permission_handler` itself only shows the
+/// system dialog the first time; subsequent calls resolve immediately from the stored decision —
+/// which is precisely why a caller with no Activity behind it can get a latched-looking answer that
+/// no dialog ever produced. Resolving that is `BlePermissionGate`'s job, not this function's: this
+/// one only reports what the platform said.
+Future<BlePermissionRequestResult> requestBlePermissions() async {
   // No runtime-permission model off-mobile — nothing to request, don't crash.
-  if (!_blePlatform) return true;
+  if (!_blePlatform) return BlePermissionRequestResult.notApplicable;
 
   final requests = <Permission>[
     Permission.bluetoothScan,
@@ -55,10 +81,28 @@ Future<bool> ensureBlePermissions() async {
 
   // We only hard-require the two Bluetooth grants; location is a legacy-only
   // helper and may be permanently denied on modern Android without blocking BLE.
-  final scanOk = statuses[Permission.bluetoothScan]?.isGranted ?? false;
-  final connectOk = statuses[Permission.bluetoothConnect]?.isGranted ?? false;
-  return scanOk && connectOk;
+  final scan = statuses[Permission.bluetoothScan];
+  final connect = statuses[Permission.bluetoothConnect];
+  final granted = (scan?.isGranted ?? false) && (connect?.isGranted ?? false);
+
+  // Latched if EITHER required grant is latched — one blocked permission is enough to keep BLE dead,
+  // and the user has to visit the same Settings screen either way. Location is excluded on purpose:
+  // it is a pre-Android-12 legacy helper that is routinely permanently-denied on modern phones
+  // WITHOUT blocking BLE at all, so counting it would wedge the guidance for a healthy install.
+  bool latched(PermissionStatus? s) =>
+      s != null && (s.isPermanentlyDenied || s.isRestricted);
+  final permanentlyDenied = !granted && (latched(scan) || latched(connect));
+
+  return BlePermissionRequestResult(
+      granted: granted, permanentlyDenied: permanentlyDenied);
 }
+
+/// Whether the app ended up with the BLE grants it needs. The bool-only face of
+/// [requestBlePermissions], kept for callers that only branch on go/no-go and surface their own
+/// message. Callers that show the user guidance should use [requestBlePermissions] + the
+/// `BlePermissionGate` instead, so a re-promptable state is not mistaken for a latched one.
+Future<bool> ensureBlePermissions() async =>
+    (await requestBlePermissions()).granted;
 
 /// Requests the notification permission (Android 13+ `POST_NOTIFICATIONS`) so the
 /// background-sync foreground service can show its status notification. iOS asks

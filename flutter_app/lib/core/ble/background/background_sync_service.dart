@@ -226,6 +226,15 @@ class BackgroundSyncService {
       debugPrint('BackgroundSyncService: client unavailable for nudge: $e');
       return;
     }
+    // Nothing paired → nothing to reconnect. The transport refuses this itself
+    // ([WhoopBleClient.resolveAutoConnect] never adopts an arbitrary advertiser), but bail here too
+    // so the notification does not claim to be "reconnecting to your strap" when there is no strap
+    // and no attempt. Belt-and-braces on purpose: this tick is headless and repeats forever, so a
+    // future edit that loosened the transport would silently turn it into an auto-pairing loop.
+    if (readPairedStrap() == null) {
+      _updateNotification('WHOOP sync', 'No strap paired yet');
+      return;
+    }
     switch (client.state) {
       case BleConnectionState.idle:
         unawaited(client.connectRemembered());

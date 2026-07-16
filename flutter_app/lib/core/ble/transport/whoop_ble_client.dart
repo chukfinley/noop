@@ -37,6 +37,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../bond/bond_refusal_give_up.dart';
 import '../bond/bond_watchdog_backoff.dart';
 import '../bond/post_bond_timeout_loop_detector.dart';
+import '../permission_gate.dart';
 import '../permissions.dart';
 import '../protocol/alarm_payload.dart';
 import '../protocol/device_family.dart';
@@ -96,6 +97,21 @@ class SyncProgress {
       'SyncProgress(recordsPersisted: $recordsPersisted, phase: $phase, '
       'percent: $percent, currentTsMs: $currentTsMs, oldestTsMs: $oldestTsMs, '
       'newestTsMs: $newestTsMs)';
+}
+
+/// What an automatic reconnect is allowed to do — the verdict of [WhoopBleClient.resolveAutoConnect].
+enum AutoConnectDecision {
+  /// A strap is remembered: reconnect straight to it by id. The only decision an automatic path can
+  /// reach without the user in the loop, because the user already made the choice it acts on.
+  reconnectRemembered,
+
+  /// Nothing is remembered and the caller explicitly opted in: scan and adopt whichever WHOOP
+  /// advertises first. Never reached unless someone passes `allowAdoptUnknown: true`.
+  adoptUnknownByScan,
+
+  /// Nothing is remembered and adopting an arbitrary advertiser is not allowed: do nothing and tell
+  /// the user to pick their band. The default, and the whole point of the enum.
+  refuseNoStrapChosen,
 }
 
 /// A WHOOP strap surfaced by [WhoopBleClient.discoverStraps] so the UI can show a picker instead of
@@ -422,6 +438,23 @@ class WhoopBleClient {
   @visibleForTesting
   int get debugEstablishTimeoutStreak => _establishTimeout.consecutiveTimeouts;
 
+  /// Drive the REAL permission classifier with the outcome `requestBlePermissions()` would have
+  /// returned, so the transient-vs-wedged split + its guidance are reachable radio-free (the plugin
+  /// itself needs a platform; the policy does not).
+  @visibleForTesting
+  bool debugApplyPermissionResult({
+    required bool granted,
+    required bool permanentlyDenied,
+    required bool userInitiated,
+    bool apple = false,
+  }) =>
+      _applyPermissionResult(
+        granted: granted,
+        permanentlyDenied: permanentlyDenied,
+        userInitiated: userInitiated,
+        apple: apple,
+      );
+
   /// Drive the REAL `_onConnected` streak reset without a radio (the full `_onConnected` needs a
   /// device; this pins only the reset half the tracker cares about).
   @visibleForTesting
@@ -554,7 +587,16 @@ class WhoopBleClient {
   /// — so the caller never has to know the model (mirrors the Kotlin `fallbackScanModel` behaviour).
   /// Passing an explicit [family] keeps the old service-filtered scan. No-op (surfaces an error)
   /// off-device. Idempotent while a scan/connection is already active. Touches the radio.
-  Future<void> connect({DeviceFamily? family}) async {
+  ///
+  /// ADOPTS WHATEVER ADVERTISES. This scan connects to the FIRST matching strap it hears, which is
+  /// only defensible when the user has explicitly asked to adopt an unknown band — a nearby stranger's
+  /// WHOOP is an equally valid scan hit, and adopting one silently persists it as the paired strap.
+  /// [connectRemembered] therefore refuses to fall through to this path unless a caller opts in; see
+  /// [resolveAutoConnect]. Prefer [connectToStrap] with a strap the user picked.
+  ///
+  /// [userInitiated] tells the permission gate whether a system dialog could have been raised by this
+  /// request — see [_permissionGateOk]. Defaults to false (the safe direction).
+  Future<void> connect({DeviceFamily? family, bool userInitiated = false}) async {
     if (!_blePlatform) {
       lastError = 'Bluetooth LE is only available on Android/iOS.';
       _log('connect ignored — no BLE on this platform');
@@ -571,9 +613,7 @@ class WhoopBleClient {
     _resetBondStateForUserAction(); // an explicit Connect re-arms the bond give-up / loop pause
 
     // Runtime permission gate first (mirrors the Kotlin caller contract).
-    final granted = await ensureBlePermissions();
-    if (!granted) {
-      lastError = 'Bluetooth permission denied.';
+    if (!await _permissionGateOk(userInitiated: userInitiated)) {
       _setState(BleConnectionState.idle);
       return;
     }
@@ -611,6 +651,47 @@ class WhoopBleClient {
   /// remembered strap's family if one is remembered, else null → the caller runs a universal scan.
   static DeviceFamily? resolveConnectFamily(PairedStrap? remembered) =>
       remembered?.family;
+
+  /// Pure auto-connect rule (unit-testable without a radio): what an automatic reconnect is allowed
+  /// to do given what — if anything — the user has actually chosen.
+  ///
+  /// The rule is: **an automatic connect may only ever reconnect a strap the user already chose.** A
+  /// BLE scan hit is not a choice. A WHOOP advertising nearby may be a partner's, a flatmate's, or a
+  /// stranger's on the other side of a gym wall, and the strap that wins a scan race is decided by
+  /// radio conditions — not by whose band it is. Adopting one is not a harmless mistake either: a
+  /// successful connect emits on [connectedStrap], which the provider layer PERSISTS to `Prefs` as
+  /// the paired strap, so a single unlucky scan silently re-points the whole app — every later
+  /// auto-reconnect, background offload and synced metric — at the wrong band, with no moment where
+  /// the user was asked anything. (Reported against the tanarchytan/noop fork: onboarding
+  /// auto-connecting to the wrong nearby band.)
+  ///
+  /// So [remembered] == null means REFUSE, not "scan and take the first thing that answers". The
+  /// honest response to "no strap chosen" is to ask the user to choose one — which is what
+  /// [discoverStraps] + [connectToStrap] are for, and what onboarding's picker step now does.
+  /// [allowAdoptUnknown] exists to keep that a policy rather than a hardcoded behaviour, and to make
+  /// the opt-in greppable; nothing passes it today.
+  ///
+  /// Note the ordering: [allowAdoptUnknown] is only consulted when nothing is remembered. A
+  /// remembered strap always wins — an opt-in to adopt an unknown band must never override a choice
+  /// the user already made.
+  static AutoConnectDecision resolveAutoConnect(
+    PairedStrap? remembered, {
+    required bool allowAdoptUnknown,
+  }) {
+    if (remembered != null) return AutoConnectDecision.reconnectRemembered;
+    return allowAdoptUnknown
+        ? AutoConnectDecision.adoptUnknownByScan
+        : AutoConnectDecision.refuseNoStrapChosen;
+  }
+
+  /// Surfaced when an automatic reconnect had no chosen strap to reconnect to. Points at the picker
+  /// (the tile is right there on the device screen, and onboarding now offers the same step) because
+  /// choosing is the only thing that can resolve this. Deliberately NOT a "retrying…" note: nothing
+  /// is retrying, and there is nothing to wait for — saying otherwise leaves the user watching a
+  /// spinner that will never resolve.
+  static const String noStrapChosenHint =
+      'No strap chosen yet. Tap "Scan for straps" and pick your band — NOOP will not '
+      'connect to a nearby WHOOP on its own.';
 
   /// Whether the Bluetooth adapter is powered on, best-effort turning it on first (Android only).
   /// Sets [lastError] and returns false when it stays off. Inert (returns true) off-device so tests
@@ -696,9 +777,11 @@ class WhoopBleClient {
         await controller.close();
         return;
       }
-      final granted = await ensureBlePermissions();
-      if (!granted) {
-        lastError = 'Bluetooth permission denied.';
+      // userInitiated: a discovery scan is only ever reachable from a picker the user opened
+      // (onboarding's "Find your strap", Settings' "Scan for straps"), so a live foreground Activity
+      // is behind it and a latched denial here is real — this is the ONE path where the wedged
+      // Settings guidance can be surfaced honestly, and the path a blocked user actually reaches for.
+      if (!await _permissionGateOk(userInitiated: true)) {
         controller.add(const <DiscoveredStrap>[]);
         await controller.close();
         return;
@@ -782,9 +865,8 @@ class WhoopBleClient {
     lastError = null;
     _resetBondStateForUserAction(); // an explicit pick re-arms the bond give-up / loop pause
 
-    final granted = await ensureBlePermissions();
-    if (!granted) {
-      lastError = 'Bluetooth permission denied.';
+    // userInitiated: reaching here means the user tapped a strap in a picker.
+    if (!await _permissionGateOk(userInitiated: true)) {
       _setState(BleConnectionState.idle);
       return;
     }
@@ -809,10 +891,20 @@ class WhoopBleClient {
 
   /// Reconnect directly to the remembered strap ([rememberedStrapLookup]) — `BluetoothDevice.fromId`
   /// with the remembered family, NO scan (mirrors the Kotlin direct-connect-to-lastDevice path, which
-  /// beats a scan for a bonded strap the OS still holds or that isn't advertising). When nothing is
-  /// remembered this falls back to a universal scan-and-connect. No-op (surfaces an error) off-device
-  /// or while already scanning/connecting. This is the auto-reconnect entry point.
-  Future<void> connectRemembered() async {
+  /// beats a scan for a bonded strap the OS still holds or that isn't advertising). No-op (surfaces an
+  /// error) off-device or while already scanning/connecting. This is the auto-reconnect entry point.
+  ///
+  /// When NOTHING is remembered this REFUSES by default rather than falling back to a universal
+  /// adopt-the-first-advertiser scan — see [resolveAutoConnect] for why. [allowAdoptUnknown] opts back
+  /// into the old fallback for a caller that can prove the user asked to adopt an unknown band; no
+  /// caller currently does, because picking is strictly better than guessing.
+  ///
+  /// [userInitiated] tells the permission gate whether a system dialog could have been raised — see
+  /// [_permissionGateOk]. Defaults to false: most callers here are automatic.
+  Future<void> connectRemembered({
+    bool allowAdoptUnknown = false,
+    bool userInitiated = false,
+  }) async {
     if (!_blePlatform) {
       lastError = 'Bluetooth LE is only available on Android/iOS.';
       _log('connectRemembered ignored — no BLE on this platform');
@@ -825,8 +917,18 @@ class WhoopBleClient {
     }
     final remembered = rememberedStrapLookup?.call();
     if (remembered == null) {
-      _log('connectRemembered — nothing remembered, running a universal scan');
-      await connect();
+      switch (resolveAutoConnect(remembered, allowAdoptUnknown: allowAdoptUnknown)) {
+        case AutoConnectDecision.refuseNoStrapChosen:
+          _log('connectRemembered refused — no strap chosen, and adopting an arbitrary '
+              'advertiser is not allowed on this path');
+          lastError = noStrapChosenHint;
+          _setState(BleConnectionState.idle);
+        case AutoConnectDecision.adoptUnknownByScan:
+          _log('connectRemembered — nothing remembered, running a universal scan (opted in)');
+          await connect(userInitiated: userInitiated);
+        case AutoConnectDecision.reconnectRemembered:
+          break; // unreachable with a null remembered — the predicate never returns it
+      }
       return;
     }
     // Honour a latched bond-loop pause: auto-reconnect is allowed only as a bounded salvage probe.
@@ -840,9 +942,7 @@ class WhoopBleClient {
     // [_resetBondStateForUserAction] we do NOT lift the bond-loop pause here (this path honours it above).
     _reconnectAttempt = 0;
 
-    final granted = await ensureBlePermissions();
-    if (!granted) {
-      lastError = 'Bluetooth permission denied.';
+    if (!await _permissionGateOk(userInitiated: userInitiated)) {
       _setState(BleConnectionState.idle);
       return;
     }
@@ -1308,6 +1408,53 @@ class WhoopBleClient {
     _log('connection-establishment timeout streak '
         '(${_establishTimeout.consecutiveTimeouts}× status 147) — surfacing recovery guidance');
     lastError = establishTimeoutHint;
+  }
+
+  /// The BLE runtime-permission gate, with the transient-vs-wedged split the bare bool never had.
+  /// Returns true when the caller is clear to proceed; otherwise sets [lastError] to the guidance
+  /// that is actually TRUE for the state we are in and returns false.
+  ///
+  /// [userInitiated] maps the caller's intent onto the precondition [BlePermissionGate.classify]
+  /// really depends on — `couldPrompt`, "was this request in a position to raise the system dialog".
+  /// They coincide in our architecture: a user-initiated request runs with a live foreground
+  /// Activity, and every automatic path (the launch kick, the Bluetooth-on listener, the foreground
+  /// service nudge, the headless WorkManager isolate) has none. It defaults to FALSE — the safe
+  /// direction, since a mis-flagged automatic request can only under-claim ("tap Connect and allow")
+  /// where it might have said "blocked", never the reverse. Over-claiming is what parks a permanent
+  /// false Settings banner on a healthy install.
+  ///
+  /// Like the #147 hint this INFORMS ONLY: nothing here touches the reconnect backoff or pauses a
+  /// retry. A permission can be granted from Settings at any moment, and a paused transport would
+  /// then sit dead until the user found a button.
+  Future<bool> _permissionGateOk({required bool userInitiated}) async {
+    final result = await requestBlePermissions();
+    return _applyPermissionResult(
+      granted: result.granted,
+      permanentlyDenied: result.permanentlyDenied,
+      userInitiated: userInitiated,
+      apple: !kIsWeb && Platform.isIOS,
+    );
+  }
+
+  /// The radio-free half of [_permissionGateOk]: classify + surface. Split out so the whole policy
+  /// (which verdict, which string) is drivable from a test without the plugin, mirroring how
+  /// `_recordConnectFailure` is driven for #147.
+  bool _applyPermissionResult({
+    required bool granted,
+    required bool permanentlyDenied,
+    required bool userInitiated,
+    required bool apple,
+  }) {
+    final outcome = BlePermissionGate.classify(
+      granted: granted,
+      permanentlyDenied: permanentlyDenied,
+      couldPrompt: userInitiated,
+    );
+    if (outcome == BlePermissionOutcome.granted) return true;
+    lastError = BlePermissionGate.hintFor(outcome, apple: apple);
+    _log('BLE permission gate: ${outcome.name} '
+        '(granted=$granted permanentlyDenied=$permanentlyDenied userInitiated=$userInitiated)');
+    return false;
   }
 
   Future<void> _onConnected(BluetoothDevice device) async {
