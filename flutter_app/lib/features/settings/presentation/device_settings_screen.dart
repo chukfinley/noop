@@ -199,11 +199,15 @@ class DeviceSettingsScreen extends ConsumerWidget {
           _syncCard(sync),
 
         // ── Connection ──────────────────────────────────────────────────────
-        // Automatic pairing: the primary action is a single Connect that calls
-        // connectRemembered() (auto-uses the remembered band, else a universal
-        // auto-detecting scan). No manual WHOOP 4-vs-5 choice — the model is
-        // detected from the strap's advertised service. "Scan for straps" opens
-        // the picker for first pairing / choosing among multiple straps.
+        // Two distinct actions, and the split is the point. RECONNECTING is
+        // automatic: Connect calls connectRemembered(), which goes straight back
+        // to the band the user already chose. PAIRING is always a choice: "Scan
+        // for straps" opens the picker. Connect does NOT pair — it no longer
+        // falls back to a scan that adopts whichever WHOOP answers first, because
+        // a partner's or a stranger's band advertises identically and whichever
+        // won that race got PERSISTED as the paired strap, silently re-pointing
+        // every later sync at the wrong wrist. Still no manual WHOOP 4-vs-5
+        // choice anywhere — the model is detected from the advertised service.
         SettingsGroup('Connection', Palette.metricCyan, [
           ..._connectionTiles(context, ref, conn, linked, busy, paired),
           if (paired != null)
@@ -391,10 +395,13 @@ class DeviceSettingsScreen extends ConsumerWidget {
     );
   }
 
-  /// The primary connect/disconnect tiles for the Connection group. Automatic
-  /// pairing throughout — Connect calls `connectRemembered()` (remembered band or
-  /// a universal auto-detecting scan); "Scan for straps" opens the picker for
-  /// first pairing / choosing among straps. No manual model choice.
+  /// The primary connect/disconnect tiles for the Connection group.
+  ///
+  /// Connect is offered ONLY with a band remembered ([paired] non-null), because
+  /// `connectRemembered()` has nothing to do without one: it reconnects the chosen
+  /// band and refuses to adopt an unknown one. With nothing remembered the sole tile
+  /// is "Scan for straps" — the picker is the only honest way to pair a first strap,
+  /// so it is also the only thing offered. No manual model choice.
   static List<Widget Function(BorderRadius)> _connectionTiles(
     BuildContext context,
     WidgetRef ref,
@@ -520,9 +527,13 @@ class DeviceSettingsScreen extends ConsumerWidget {
     await ref.read(whoopBleClientProvider).setDeviceConfig(broadcastHr: value);
   }
 
-  /// Automatic connect: `connectRemembered()` reconnects the remembered band, or
-  /// runs a universal auto-detecting scan when nothing is remembered. Surfaces the
-  /// transport's own error honestly (e.g. no BLE off-device).
+  /// Automatic connect: `connectRemembered()` reconnects the REMEMBERED band directly.
+  /// It no longer falls back to a universal adopt-the-first-advertiser scan when nothing
+  /// is remembered — it refuses, because a scan hit is not a choice. This tile only
+  /// renders with a band remembered ([_connectionTiles] gates on `paired != null`, which
+  /// reads the same `readPairedStrap()` the transport's `rememberedStrapLookup` does), so
+  /// in practice the refusal is unreachable from here; pairing happens through "Scan for
+  /// straps". Surfaces the transport's own error honestly (e.g. no BLE off-device).
   static Future<void> _connect(BuildContext context, WidgetRef ref) async {
     final client = ref.read(whoopBleClientProvider);
     await ensureBlePermissions();
@@ -532,7 +543,12 @@ class DeviceSettingsScreen extends ConsumerWidget {
     await ensureNotificationPermission();
     if (!context.mounted) return;
     noopToast(context, 'Connecting…');
-    await client.connectRemembered();
+    // userInitiated: this is a tap, with an Activity behind it, so a permission denial
+    // reported here is the user's real answer rather than a background probe's guess —
+    // which is the only condition under which the gate is allowed to send someone to
+    // system Settings. Without it a permanently-denied user gets the retry hint, and the
+    // retry it tells them to make can never raise a dialog again.
+    await client.connectRemembered(userInitiated: true);
     if (!context.mounted) return;
     final err = client.lastError;
     if (err != null) noopToast(context, err, kind: ToastKind.warning);
@@ -669,8 +685,23 @@ class DeviceSettingsScreen extends ConsumerWidget {
     final ok = await client.enableAdapter();
     if (!context.mounted) return;
     if (ok) {
-      // Adapter is on now — reconnect the remembered strap (no enable prompt).
-      unawaited(client.connectRemembered());
+      // Adapter is on now — reconnect the remembered strap (no enable prompt: the reconnect
+      // re-checks the adapter without `promptIfOff`, so it cannot stack a second dialog).
+      //
+      // userInitiated: a tap with a live Activity behind it, so a permission denial reported
+      // during this reconnect is the user's real answer and earns the Settings guidance rather
+      // than the retry hint (see [_connect]). It raises no extra dialog of its own — the flag
+      // only decides how the OUTCOME is classified, never whether we ask.
+      //
+      // Deliberately still fire-and-forget, and deliberately NOT relaying `lastError` the way
+      // the Connect / Sync-now tiles do: flipping the adapter on also fires main.dart's
+      // bleAdapterOnProvider listener, which kicks its own connectRemembered(). Whichever call
+      // loses that race returns early on the "already scanning/connecting" guard, which does not
+      // clear `lastError` — so reading it here would toast whatever stale error happened to be
+      // sitting there, from a connect that is in fact proceeding fine. Nothing is lost: with a
+      // band remembered the reconnect is under way, and with none the screen is already showing
+      // "Scan for straps" as its primary tile.
+      unawaited(client.connectRemembered(userInitiated: true));
     } else {
       noopToast(context, client.lastError ?? 'Could not turn Bluetooth on.',
           kind: ToastKind.warning);
@@ -792,7 +823,12 @@ class DeviceSettingsScreen extends ConsumerWidget {
     }
     if (!context.mounted) return;
     noopToast(context, 'Syncing…');
-    await client.connectRemembered();
+    // userInitiated: a tap, so a permission denial here is authoritative (see [_connect]).
+    // Unlike the Connect tile, THIS one renders unconditionally in the Device group, so it
+    // is the one place on this screen that can genuinely reach the "no strap chosen"
+    // refusal — and it relays it below, pointing the user at the "Scan for straps" tile
+    // that is already on screen in exactly that state.
+    await client.connectRemembered(userInitiated: true);
     if (!context.mounted) return;
     final err = client.lastError;
     if (err != null) {

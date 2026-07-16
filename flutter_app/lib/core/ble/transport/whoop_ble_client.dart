@@ -39,6 +39,7 @@ import '../bond/bond_watchdog_backoff.dart';
 import '../bond/post_bond_timeout_loop_detector.dart';
 import '../permission_gate.dart';
 import '../permissions.dart';
+import '../strap_log_pii.dart';
 import '../protocol/alarm_payload.dart';
 import '../protocol/device_family.dart';
 import '../protocol/enums.dart';
@@ -1357,7 +1358,15 @@ class WhoopBleClient {
   Future<void> _connectToDevice(BluetoothDevice device) async {
     _device = device;
     _setState(BleConnectionState.connecting);
-    _log('Connecting to ${device.remoteId.str} (${_family.name})');
+    // #445: name the strap by its OPAQUE token, never its raw id. The sink scrubber ([redactStrapLogPii])
+    // would mask this on Android, where remoteId IS the MAC — but on iOS remoteId is a per-app peripheral
+    // UUID, which is dash-separated and so matches no MAC pattern any scrubber could reasonably carry. The
+    // id therefore has to be masked HERE, where we know what it is, rather than hoped-for downstream.
+    // [BondRefusalGiveUp.opaqueId] is the idiom that already exists for exactly this (the bond epitaph
+    // names the same strap the same way): one hash, platform-agnostic, and the connect + epitaph lines
+    // now carry the SAME token for the same strap, so a trace still reads as one story.
+    _log('Connecting to strap [${BondRefusalGiveUp.opaqueId(device.remoteId.str)}] '
+        '(${_family.name})');
     _reassembler = Reassembler(_family);
 
     _connSub?.cancel();
@@ -2508,10 +2517,17 @@ class WhoopBleClient {
   }
 
   void _log(String line) {
-    if (kDebugMode) debugPrint('[WhoopBleClient] $line');
+    // #445: scrub MACs + WHOOP serials HERE, at the single writer into the shareable buffer, not at
+    // each call site. Every consumer (the on-screen trace and the "copy" action that exists to paste
+    // this into a bug report) reads _logBuffer, so redacting on the way IN masks all of them at once
+    // and no future _log(...) call can leak by forgetting. debugPrint is scrubbed too: it is
+    // kDebugMode-only and never shared, but a redacted line is the only line this method has, and a
+    // second un-redacted format string is exactly the drift that puts the MAC back in the log.
+    final safe = redactStrapLogPii(line);
+    if (kDebugMode) debugPrint('[WhoopBleClient] $safe');
     // Append to the rolling buffer (device-runtime timestamp) and republish the whole trace. This
     // only ever runs once the client is used (connect/scan) — construction touches no _log.
-    _logBuffer.add(ConnLogEntry(DateTime.now(), line));
+    _logBuffer.add(ConnLogEntry(DateTime.now(), safe));
     if (_logBuffer.length > _maxLogEntries) {
       _logBuffer.removeRange(0, _logBuffer.length - _maxLogEntries);
     }
