@@ -975,12 +975,32 @@ class _StressEnergy extends ConsumerWidget {
             children: [
               Icon(Icons.bolt_rounded, color: Palette.chargeColor, size: 22),
               const SizedBox(width: Metrics.space12),
+              // Energy is `charge` re-expressed, so it gets charge's THREE states,
+              // not two — and the same '—' / 'N/4' treatment the Recovery cell
+              // above uses, so the screen speaks one language about one number.
+              // On an unscored night `day.vitality` is the population-mean filler
+              // (58): rendering it as "58%" over a 58%-full bar invented a reading
+              // out of a stand-in. The bar empties rather than showing "0%", which
+              // would trade the fake reading for a false one.
               Expanded(
-                  child: _EnergyBar(fraction: (day.vitality / 100).clamp(0, 1))),
+                child: _EnergyBar(
+                  fraction:
+                      day.chargeScored ? (day.vitality / 100).clamp(0, 1) : 0,
+                ),
+              ),
               const SizedBox(width: Metrics.space12),
-              Text('${day.vitality}%',
-                  style:
-                      NoopType.number(18).copyWith(color: Palette.textPrimary)),
+              Text(
+                day.chargeCalibrating
+                    ? '${day.chargeCalibrationNights}/$recoveryCalibrationNightsNeeded'
+                    : day.chargeNoData
+                        ? '—'
+                        : '${day.vitality}%',
+                style: NoopType.number(18).copyWith(
+                  color: day.chargeScored
+                      ? Palette.textPrimary
+                      : Palette.textTertiary,
+                ),
+              ),
             ],
           ),
         ),

@@ -39,6 +39,15 @@ class SleepRecord {
   final List<double> restlessness; // 0..1 per epoch (motion strip)
   final int disturbances;
 
+  /// True when this night was staged on motion too sparse to trust the staging
+  /// (#345, [SleepStager.motionSparseOver]) — a night with real holes in the
+  /// banked data. The stages, totals and [efficiency] are unchanged and remain
+  /// the engine's honest best read; this says only how far they can be believed,
+  /// so a confident 85–100 Rest is not claimed on data that cannot earn it.
+  /// Upstream's rule is the same — the engine emits the tier, no stage is faked,
+  /// and the UI surfaces it.
+  final bool motionSparse;
+
   const SleepRecord({
     required this.date,
     required this.bedtime,
@@ -55,6 +64,7 @@ class SleepRecord {
     this.hypnogram = const [],
     this.restlessness = const [],
     this.disturbances = 0,
+    this.motionSparse = false,
   });
 
   /// Sleep performance = asleep / need, clamped to 100.
@@ -144,7 +154,12 @@ class DayRecord {
   final int steps;
   final int calories; // kcal
   final int fitnessAge; // years
-  final int vitality; // 0..100
+  /// Energy 0..100 — [charge] re-expressed, so it inherits [charge]'s contract
+  /// EXACTLY: on a calibrating or no-data night this is the rounded population-mean
+  /// FILLER (58), not a reading. Gate every render on [chargeScored], never on
+  /// `vitality != 0` — an unscored night is not 0% energy, and "0%" is a worse lie
+  /// than the 58 it would replace.
+  final int vitality;
   final double hydration; // 0..1
   final SleepRecord? sleep;
   final List<Workout> workouts;
