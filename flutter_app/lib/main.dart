@@ -138,61 +138,207 @@ class _BackgroundSyncLifecycleObserver extends WidgetsBindingObserver {
   }
 }
 
-/// Debounced live re-derivation: on any change to the WHOOP HR/RR/gravity stream
-/// tables, rebuild [LiveRepository] from the DB and push it into the container so
-/// dependent providers (days, vitals, …) refresh. Debounced because one offload
-/// writes many rows in bursts. Never cancelled — it lives for the app's lifetime.
-void _wireLiveReload(ProviderContainer container, AppDatabase db) {
-  Timer? debounce;
-  var loading = false; // a rebuild is in flight
-  var pending = false; // another was requested while one was running
+/// Meters calls to a live rebuild so a strap offload cannot peg the CPU.
+///
+/// A rebuild is [LiveRepository.load] — it re-reads the WHOOP stream tables for
+/// every local day the store holds and re-scores them. Its cost is linear in
+/// TOTAL history and it is not small: 19eb1b2a measured it, on a store seeded at
+/// realistic offload density, at 652 ms for 1 day, 3.5 s for 7, 13.4 s for 30 and
+/// **44 s for 90** — and 95 % of that (the reads, the merge, the bucketing) is on
+/// the main isolate; only the scoring is handed to [Isolate.run]. An offload
+/// writes rows in bursts over minutes, so the requests do not stop coming while
+/// one of these is running.
+///
+/// The policy this replaces was a bare 2 s trailing-edge debounce plus a
+/// single-flight guard that re-ran immediately on completion. It had no notion of
+/// what a rebuild costs, and so was wrong in BOTH tick regimes, in opposite
+/// directions:
+///
+///  * **Ticks further apart than the settle window → thrash.** The timer fires
+///    during the 44 s rebuild, the guard latches `pending`, and completion starts
+///    the next rebuild back-to-back. One such gap anywhere in a rebuild is enough
+///    to latch it, and it re-latches every cycle: the store is then re-read
+///    end-to-end, continuously, for the whole offload and once more after it. That
+///    is ~100 % main-isolate occupancy — the overheating the user reports. A 2 s
+///    debounce can only ever meter work that FINISHES inside 2 s; this never does.
+///  * **Ticks closer together than the settle window → starvation.** Each tick
+///    cancelled and re-armed the timer, so a burst that never pauses for 2 s
+///    deferred the rebuild indefinitely and NOTHING appeared until the sync ended.
+///
+/// Both follow from metering by wall-clock alone, so the fix is to meter against
+/// the measured cost instead:
+///
+///  * [settle] still coalesces a burst (unchanged intent, unchanged 2 s).
+///  * [maxWait] caps how long re-arming can defer the FIRST rebuild of a burst —
+///    a burst that never pauses is not a burst, and past this point we stop
+///    waiting for a lull that is not coming and show what we have. It bounds only
+///    that first rebuild's latency; everything after is governed by the cooldown,
+///    so guessing it wrong costs at most one extra rebuild per offload.
+///  * [dutyFactor] is the load-bearing one: after a rebuild finishes, the next may
+///    not START for `dutyFactor x` however long that rebuild actually TOOK. That
+///    caps sustained main-isolate occupancy at `1 / (1 + dutyFactor)` — 20 % at
+///    the default 4 — no matter how much history exists, and it scales itself: a
+///    1-day store rebuilds in 652 ms and is free again 2.6 s later (still feels
+///    live), a 90-day store takes 44 s and is left alone for ~3 min. No fixed
+///    constant does both; that is precisely why raising the 2 s would not have
+///    fixed this — at 90 days the phone still cooks at any constant below ~3 min,
+///    while at 1 day that same constant makes a nearly-free rebuild feel broken.
+///
+/// Deliberately NOT capped at some maximum cooldown. A cap re-introduces the bug
+/// it was capping: a store big enough for the cap to bind is exactly a store whose
+/// rebuild is expensive, so clamping the gap puts occupancy straight back up (a
+/// 350 s rebuild under a 3 min cap runs 66 % of the time). The duty bound is the
+/// whole guarantee; it only holds if it is unconditional. The floor is [settle],
+/// so a trivially cheap store is never throttled below the burst coalescing it
+/// needs anyway.
+///
+/// The cost is measured on the WALL clock, which is not the same as CPU time: if
+/// the process is suspended mid-rebuild the measurement absorbs the suspension and
+/// the next cooldown comes out too long. Accepted knowingly, because every way it
+/// can go wrong is bounded and mild — the meter is per-process, so a launch always
+/// loads fresh regardless; a user action ([request] with `immediate`) ignores the
+/// cooldown outright; and the only symptom left is live updates pausing too long
+/// inside one session, which is the direction we would rather err. Measuring CPU
+/// time instead would need a clock Dart does not portably offer, and a suspended
+/// app is not the one overheating.
+///
+/// The real fix is to stop re-reading unchanged days at all — an offload appends
+/// to the tail, so a rebuild should touch the days that moved, not all 90. That is
+/// a change to [LiveRepository] and its day cache, not to the metering; until it
+/// lands, this bounds the damage.
+class LiveReloadScheduler {
+  LiveReloadScheduler({
+    required Future<void> Function() load,
+    this.settle = const Duration(seconds: 2),
+    this.maxWait = const Duration(seconds: 15),
+    this.dutyFactor = 4,
+    DateTime Function()? clock,
+    Timer Function(Duration, void Function())? timerFactory,
+  })  : _load = load,
+        _clock = clock ?? DateTime.now,
+        _timerFactory = timerFactory ?? Timer.new;
 
-  // Rebuild the repository, guarded so at most ONE runs at a time. Extra
-  // requests during a run collapse into a single trailing rebuild. Without this
-  // guard a long offload (which writes rows in bursts) could start overlapping
-  // full re-scores of the whole store — the CPU peg that overheated the phone.
-  Future<void> reload() async {
-    if (loading) {
-      pending = true;
+  final Future<void> Function() _load;
+  final DateTime Function() _clock;
+  final Timer Function(Duration, void Function()) _timerFactory;
+
+  /// How long a burst must be quiet before its rebuild runs.
+  final Duration settle;
+
+  /// The longest [settle] may keep deferring the first rebuild of a burst.
+  final Duration maxWait;
+
+  /// Idle multiple of the last rebuild's duration to wait before the next starts.
+  final int dutyFactor;
+
+  Timer? _timer;
+  bool _running = false;
+  bool _pending = false; // a metered request arrived mid-rebuild
+  bool _pendingNow = false; // ...and at least one of them was a user action
+  DateTime? _firstRequestAt; // start of the burst currently being coalesced
+  DateTime? _earliestStart; // cooldown floor from the last rebuild's cost
+
+  /// Ask for a rebuild.
+  ///
+  /// [immediate] means a person is waiting on this exact rebuild — they switched
+  /// analysis engine, or they imported a backup — as opposed to the strap having
+  /// written some rows. Those bypass settle and cooldown both: they arrive at
+  /// human speed so they cannot thrash, and making someone wait out a 3-minute
+  /// cooldown to see the engine they just picked would trade this bug for a worse
+  /// one. They still respect single-flight.
+  void request({bool immediate = false}) {
+    if (_running) {
+      _pending = true;
+      _pendingNow |= immediate;
       return;
     }
-    loading = true;
-    try {
-      final fresh =
-          await LiveRepository.load(db, hrvWindow: Prefs.instance.hrvWindow);
-      container.updateOverrides([
-        repositoryProvider.overrideWithValue(fresh),
-        databaseProvider.overrideWithValue(db),
-      ]);
-    } catch (e, st) {
-      debugPrint('live reload failed: $e\n$st');
-    } finally {
-      loading = false;
-      if (pending) {
-        pending = false;
-        unawaited(reload()); // run the coalesced trailing rebuild once
-      }
+    final now = _clock();
+    if (immediate) {
+      _arm(Duration.zero);
+      return;
     }
+    _firstRequestAt ??= now;
+    // The earlier of "settle after this tick" and "maxWait after the burst
+    // began" — then held back to the cooldown floor, which outranks both.
+    var target = now.add(settle);
+    final cap = _firstRequestAt!.add(maxWait);
+    if (cap.isBefore(target)) target = cap;
+    final floor = _earliestStart;
+    if (floor != null && floor.isAfter(target)) target = floor;
+    final wait = target.difference(now);
+    _arm(wait.isNegative ? Duration.zero : wait);
   }
 
-  db.watchWhoopStreams().listen((_) {
-    debounce?.cancel();
-    // A longer settle window than the raw stream cadence: one offload writes
-    // rows in dense bursts, and each rebuild re-queries the whole store and
-    // re-scores the active engine. Coalescing to ~2 s keeps a long sync from
-    // triggering a rebuild storm.
-    debounce = Timer(const Duration(milliseconds: 2000), reload);
+  void _arm(Duration d) {
+    _timer?.cancel();
+    _timer = _timerFactory(d, _run);
+  }
+
+  void _run() {
+    if (_running) {
+      _pending = true;
+      return;
+    }
+    _running = true;
+    _firstRequestAt = null;
+    final startedAt = _clock();
+    // Deliberately not `await`ed: _run is a timer callback. The continuation
+    // below carries the whole completion path.
+    unawaited(_load().catchError((Object e, StackTrace st) {
+      // A failed rebuild still COST its time, so it still owes the cooldown —
+      // returning here (rather than rethrowing) keeps the finally-equivalent
+      // below on the one path that updates the meter.
+      debugPrint('live reload failed: $e\n$st');
+    }).whenComplete(() {
+      _running = false;
+      final took = _clock().difference(startedAt);
+      // Cooldown from COMPLETION, not from start: gap = dutyFactor x cost gives a
+      // flat 1/(1+dutyFactor) duty cycle, which is the number this class promises.
+      var cool = took * dutyFactor;
+      if (cool < settle) cool = settle;
+      _earliestStart = _clock().add(cool);
+      if (!_pending) return;
+      final wasNow = _pendingNow;
+      _pending = false;
+      _pendingNow = false;
+      request(immediate: wasNow);
+    }));
+  }
+
+  /// Stops any armed timer. The app-lifetime instance never needs this; tests do.
+  void dispose() => _timer?.cancel();
+}
+
+/// Metered live re-derivation: on any change to the WHOOP HR/RR/gravity stream
+/// tables, rebuild [LiveRepository] from the DB and push it into the container so
+/// dependent providers (days, vitals, …) refresh. Metering — the part that keeps a
+/// long offload from cooking the phone — lives in [LiveReloadScheduler]. Never
+/// cancelled: it lives for the app's lifetime.
+void _wireLiveReload(ProviderContainer container, AppDatabase db) {
+  final scheduler = LiveReloadScheduler(load: () async {
+    final fresh =
+        await LiveRepository.load(db, hrvWindow: Prefs.instance.hrvWindow);
+    container.updateOverrides([
+      repositoryProvider.overrideWithValue(fresh),
+      databaseProvider.overrideWithValue(db),
+    ]);
   });
+
+  db.watchWhoopStreams().listen((_) => scheduler.request());
 
   // Switching analysis engine only re-points the UI at that engine's scores —
   // but a not-yet-computed engine has to be scored first. Rebuild on the change
   // so the newly-selected engine is computed on demand (guarded/off-isolate).
-  container.listen<String>(selectedEngineProvider, (_, __) => reload());
+  // `immediate`: the user is looking at the picker waiting for it.
+  container.listen<String>(
+      selectedEngineProvider, (_, __) => scheduler.request(immediate: true));
 
   // A data import writes rows via raw SQL that drift's stream tracking misses,
   // so rebuild when the import counter bumps — otherwise imported history would
-  // only surface after a restart or the next strap sync.
-  container.listen<int>(dataRevisionProvider, (_, __) => reload());
+  // only surface after a restart or the next strap sync. `immediate`: the user
+  // just picked the file and is waiting on it.
+  container.listen<int>(
+      dataRevisionProvider, (_, __) => scheduler.request(immediate: true));
 }
 
 /// Hides the scrollbar on every scrollable (desktop shows one by default).
