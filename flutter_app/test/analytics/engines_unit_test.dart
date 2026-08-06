@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:noop/core/analytics/baselines.dart';
 import 'package:noop/core/analytics/hrv_analyzer.dart';
@@ -81,6 +83,94 @@ void main() {
       final e = StrainScorer.strain(
         tsSec: [0, 1, 2],
         bpm: [120, 120, 120],
+        maxHR: 187,
+        restingHR: 60,
+      );
+      expect(e, isNull);
+    });
+
+    test('per-sample durations: each covers gap to next, clamped, last reused '
+        '(#950)', () {
+      // ts gaps: 30s→0.5min · 60s→1.0min · 0s(coincident)→fallback ·
+      // 8910s→148.5min clamped to maxSampleGapMin (2.0); the final reading has
+      // no successor so it reuses the gap before it (2.0).
+      final d = StrainScorer.sampleDurationsMinutes([0, 30, 90, 90, 9000]);
+      expect(d.length, 5);
+      expect(d[0], closeTo(0.5, 1e-9));
+      expect(d[1], closeTo(1.0, 1e-9));
+      expect(d[2], closeTo(StrainScorer.fallbackSampleMin, 1e-9));
+      expect(d[3], closeTo(StrainScorer.maxSampleGapMin, 1e-9));
+      expect(d[4], closeTo(StrainScorer.maxSampleGapMin, 1e-9));
+    });
+
+    test('uniform spacing → every duration identical, TRIMP unchanged (#950 '
+        'identity)', () {
+      // The whole point of #950: on a uniformly spaced stream the per-sample
+      // durations collapse to the old single value, so Effort does not move.
+      final ts = List<int>.generate(600, (i) => i);
+      final d = StrainScorer.sampleDurationsMinutes(ts);
+      expect(d.length, 600);
+      for (final x in d) {
+        expect(x, closeTo(StrainScorer.fallbackSampleMin, 1e-12));
+      }
+    });
+
+    test('a dropout gap cannot invent hours of Effort (#950 clamp)', () {
+      // A 25-sample burst at 180 bpm (94%HRR → Edwards zone 5) taken 1 s apart,
+      // then a single multi-hour dropout. Crediting the last pre-gap reading with
+      // the whole hole would explode TRIMP; the 2-min clamp bounds it.
+      final ts = [
+        for (var i = 0; i < 25; i++) i, // 1 Hz burst
+        10000, // ~2.7 h dropout after the burst
+      ];
+      final bpm = List<double>.filled(ts.length, 180);
+      final e = StrainScorer.strain(
+        tsSec: ts,
+        bpm: bpm,
+        maxHR: 187,
+        restingHR: 60,
+      )!;
+      // Durations: 24×(1/60) + 2.0 (clamped gap) + 2.0 (reused) = 4.4 min.
+      // TRIMP = zone5(=5) × 4.4 = 22.0 → 100·ln(23)/ln(7201).
+      final expected = 100.0 *
+          math.log(22.0 + 1.0) /
+          math.log(StrainScorer.strainDenominator);
+      expect(e, closeTo(expected, 1e-2));
+    });
+
+    test('Banister path is duration-weighted under the same dropout (#950)', () {
+      // Same burst + multi-hour dropout, but the Banister method — pins the OTHER
+      // TRIMP loop that #950 changed. All samples share one intensity, so TRIMP =
+      // (per-sample Banister term) × Σdurations (4.4 min).
+      final ts = [
+        for (var i = 0; i < 25; i++) i,
+        10000,
+      ];
+      final bpm = List<double>.filled(ts.length, 180);
+      final e = StrainScorer.strain(
+        tsSec: ts,
+        bpm: bpm,
+        maxHR: 187,
+        restingHR: 60,
+        method: StrainMethod.banister,
+      )!;
+      const x = (180.0 - 60.0) / 127.0; // %HRR fraction (0.9449, unclamped)
+      final perMin =
+          x * StrainScorer.banisterScale * math.exp(StrainScorer.banisterBMen * x);
+      final trimp = perMin * 4.4; // Σdurations
+      final expected = 100.0 *
+          math.log(trimp + 1.0) /
+          math.log(StrainScorer.strainDenominator);
+      expect(e, closeTo(expected, 1e-2));
+    });
+
+    test('desynced tsSec/bpm lengths → null, never a range crash (#950)', () {
+      // bpm clears the dense gate (≥ minReadings) so enoughData is true; tsSec is
+      // one shorter, so without the parallel-length guard the TRIMP loop would
+      // index durations[i] out of range. The guard returns null instead.
+      final e = StrainScorer.strain(
+        tsSec: List<int>.generate(599, (i) => i), // one short
+        bpm: List<double>.filled(600, 120),
         maxHR: 187,
         restingHR: 60,
       );

@@ -9,7 +9,8 @@ import 'dart:math' as math;
 /// Pipeline:
 ///   1. Heart-Rate Reserve (Karvonen): HRR = HRmax − RHR.
 ///   2. Per-sample intensity as %HRR = (HR − RHR) / HRR × 100, clamped 0..100.
-///   3. TRIMP accumulated over the window:
+///   3. TRIMP accumulated over the window, each sample weighted by its OWN gap to
+///      the next reading (clamped to [maxSampleGapMin], #950):
 ///        a. Edwards 5-zone summation (default).
 ///        b. Banister exponential.
 ///   4. Logarithmic compression onto [0, 100]:
@@ -49,6 +50,14 @@ class StrainScorer {
 
   /// Fallback per-sample duration (minutes) — 1 s at 1 Hz.
   static const double fallbackSampleMin = 1.0 / 60.0;
+
+  /// Longest span (minutes) a single reading may be credited with (#950). A wear
+  /// or connection dropout leaves a gap with no data in it; without a ceiling the
+  /// last reading before the gap would be credited with the whole of it, so one
+  /// sample in zone 5 could invent hours of effort. 2 min is 4× the sparsest real
+  /// cadence we know of (the 5/MG's ~30 s, see [minSparseReadings]), so no genuine
+  /// cadence is truncated.
+  static const double maxSampleGapMin = 2.0;
 
   static const int defaultAge = 30;
   static const double defaultRestingHR = 60.0;
@@ -133,36 +142,68 @@ class StrainScorer {
 
   /// Infer per-sample duration (minutes) from the first two timestamps. Falls
   /// back to 1 s when fewer than two samples or coincident timestamps.
+  ///
+  /// No production caller remains — TRIMP uses [sampleDurationsMinutes] (#950).
+  /// Kept ONLY so the uniform-identity regression test can compare the new
+  /// accumulation against the SHIPPED old formula rather than a reimplementation
+  /// of it. Delete it if that test ever goes.
   static double sampleDurationMinutes(List<int> tsSec) {
     if (tsSec.length < 2) return fallbackSampleMin;
     final deltaS = (tsSec[1] - tsSec[0]).toDouble().abs();
     return deltaS > 0 ? deltaS / 60.0 : fallbackSampleMin;
   }
 
+  /// Per-sample durations (minutes): each reading covers the gap to the NEXT one,
+  /// clamped to [maxSampleGapMin]; the last reuses the gap before it.
+  ///
+  /// #950: TRIMP used to take ONE duration inferred from the first two timestamps
+  /// and multiply the whole zone-weight sum by it. NOOP's HR stream is not
+  /// uniformly spaced — live Bluetooth arrives ~1 s apart, banked 5/MG history
+  /// ~30 s, and dropouts leave larger holes — so whichever gap happened to be
+  /// first set the scale for the entire window. Worse, a workout window and the
+  /// day that contains it start at different samples, so they picked different
+  /// factors and the two Effort numbers stopped being comparable.
+  ///
+  /// For a UNIFORMLY spaced series every gap is the same, so this returns the old
+  /// value for every sample and the resulting TRIMP is unchanged — which is why
+  /// no existing test moves. Byte-parity twin of Kotlin `sampleDurationsMinutes`.
+  static List<double> sampleDurationsMinutes(List<int> tsSec) {
+    if (tsSec.isEmpty) return const [];
+    if (tsSec.length == 1) return [fallbackSampleMin];
+    final out = <double>[];
+    for (var i = 0; i < tsSec.length - 1; i++) {
+      final deltaS = (tsSec[i + 1] - tsSec[i]).toDouble().abs();
+      final minutes = deltaS > 0 ? deltaS / 60.0 : fallbackSampleMin;
+      out.add(math.min(minutes, maxSampleGapMin));
+    }
+    out.add(out.last); // final reading has no successor; reuse the gap before it
+    return out;
+  }
+
   static double edwardsTRIMP(
     List<double> bpm,
     double restingHR,
     double hrReserve,
-    double sampleDurationMin,
+    List<double> durations,
   ) {
-    var weighted = 0;
-    for (final b in bpm) {
-      weighted += zoneWeight(b, restingHR, hrReserve);
+    var acc = 0.0;
+    for (var i = 0; i < bpm.length; i++) {
+      acc += zoneWeight(bpm[i], restingHR, hrReserve) * durations[i];
     }
-    return weighted.toDouble() * sampleDurationMin;
+    return acc;
   }
 
   static double banisterTRIMP(
     List<double> bpm,
     double restingHR,
     double hrReserve,
-    double sampleDurationMin,
+    List<double> durations,
     double b,
   ) {
     var acc = 0.0;
-    for (final s in bpm) {
-      final x = pctHRR(s, restingHR, hrReserve) / 100.0;
-      if (x > 0) acc += sampleDurationMin * x * banisterScale * math.exp(b * x);
+    for (var i = 0; i < bpm.length; i++) {
+      final x = pctHRR(bpm[i], restingHR, hrReserve) / 100.0;
+      if (x > 0) acc += durations[i] * x * banisterScale * math.exp(b * x);
     }
     return acc;
   }
@@ -211,8 +252,14 @@ class StrainScorer {
       enoughData = false;
     }
     if (!enoughData || effMax <= restingHR) return null;
+    // [tsSec] and [bpm] are parallel by contract (the pipeline builds them
+    // together). Since #950 the TRIMP loops index durations[i] against bpm, so a
+    // desynced pair would throw — refuse it rather than crash. (Moot upstream,
+    // where a single List<HrSample> can't desync; this guards the Dart port's
+    // parallel-array signature.)
+    if (tsSec.length != bpm.length) return null;
 
-    final sampleDur = sampleDurationMinutes(tsSec);
+    final durations = sampleDurationsMinutes(tsSec);
     final hrReserve = effMax - restingHR;
 
     final double trimp;
@@ -221,9 +268,9 @@ class StrainScorer {
         final b = sex.toLowerCase().startsWith('f')
             ? banisterBWomen
             : banisterBMen;
-        trimp = banisterTRIMP(bpm, restingHR, hrReserve, sampleDur, b);
+        trimp = banisterTRIMP(bpm, restingHR, hrReserve, durations, b);
       case StrainMethod.edwards:
-        trimp = edwardsTRIMP(bpm, restingHR, hrReserve, sampleDur);
+        trimp = edwardsTRIMP(bpm, restingHR, hrReserve, durations);
     }
     return trimpToStrain(trimp, denominator);
   }
