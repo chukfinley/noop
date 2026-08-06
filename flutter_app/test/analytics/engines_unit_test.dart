@@ -137,6 +137,45 @@ void main() {
           math.log(StrainScorer.strainDenominator);
       expect(e, closeTo(expected, 1e-2));
     });
+
+    test('Banister path is duration-weighted under the same dropout (#950)', () {
+      // Same burst + multi-hour dropout, but the Banister method — pins the OTHER
+      // TRIMP loop that #950 changed. All samples share one intensity, so TRIMP =
+      // (per-sample Banister term) × Σdurations (4.4 min).
+      final ts = [
+        for (var i = 0; i < 25; i++) i,
+        10000,
+      ];
+      final bpm = List<double>.filled(ts.length, 180);
+      final e = StrainScorer.strain(
+        tsSec: ts,
+        bpm: bpm,
+        maxHR: 187,
+        restingHR: 60,
+        method: StrainMethod.banister,
+      )!;
+      const x = (180.0 - 60.0) / 127.0; // %HRR fraction (0.9449, unclamped)
+      final perMin =
+          x * StrainScorer.banisterScale * math.exp(StrainScorer.banisterBMen * x);
+      final trimp = perMin * 4.4; // Σdurations
+      final expected = 100.0 *
+          math.log(trimp + 1.0) /
+          math.log(StrainScorer.strainDenominator);
+      expect(e, closeTo(expected, 1e-2));
+    });
+
+    test('desynced tsSec/bpm lengths → null, never a range crash (#950)', () {
+      // bpm clears the dense gate (≥ minReadings) so enoughData is true; tsSec is
+      // one shorter, so without the parallel-length guard the TRIMP loop would
+      // index durations[i] out of range. The guard returns null instead.
+      final e = StrainScorer.strain(
+        tsSec: List<int>.generate(599, (i) => i), // one short
+        bpm: List<double>.filled(600, 120),
+        maxHR: 187,
+        restingHR: 60,
+      );
+      expect(e, isNull);
+    });
   });
 
   group('RecoveryScorer', () {

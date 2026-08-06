@@ -252,6 +252,12 @@ class StrainScorer {
       enoughData = false;
     }
     if (!enoughData || effMax <= restingHR) return null;
+    // [tsSec] and [bpm] are parallel by contract (the pipeline builds them
+    // together). Since #950 the TRIMP loops index durations[i] against bpm, so a
+    // desynced pair would throw — refuse it rather than crash. (Moot upstream,
+    // where a single List<HrSample> can't desync; this guards the Dart port's
+    // parallel-array signature.)
+    if (tsSec.length != bpm.length) return null;
 
     final durations = sampleDurationsMinutes(tsSec);
     final hrReserve = effMax - restingHR;
